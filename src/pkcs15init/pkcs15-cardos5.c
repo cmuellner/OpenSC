@@ -1277,9 +1277,8 @@ cardos5_store_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	int			 r;
 
 	if (obj->type != SC_PKCS15_TYPE_PRKEY_RSA ||
-	    keyinfo->usage != SC_PKCS15_PRKEY_USAGE_SIGN ||
 	    keyinfo->modulus_length > 4096) {
-		sc_log(ctx, "only sign rsa keys <= 4096-bit are supported");
+		sc_log(ctx, "only private rsa keys <= 4096-bit are supported");
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 
