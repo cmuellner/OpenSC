@@ -150,10 +150,10 @@ store_pin(sc_profile_t *profile, sc_card_t *card,
     size_t pin_len)
 {
 	struct sc_cardctl_cardos_obj_info	args;
-	uint8_t					payload_buf[128];
+	uint8_t					payload_buf[256];
 	uint8_t					arl_buf[128];
 	uint8_t					retries_buf[16];
-	uint8_t					paddedpin[16];
+	uint8_t					paddedpin[128];
 	buf_t					payload;
 	buf_t					arl;
 	buf_t					retries_oci;

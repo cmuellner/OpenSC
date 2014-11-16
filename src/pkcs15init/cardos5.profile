@@ -2,7 +2,7 @@
 # PKCS15 r/w profile for Atos CardOS 5
 #
 cardinfo {
-    max-pin-length	= 8;
+    max-pin-length	= 127;
     pin-encoding	= ascii-numeric;
     pin-pad-char	= 0x00;
 }
