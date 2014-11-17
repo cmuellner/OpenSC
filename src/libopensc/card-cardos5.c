@@ -1237,8 +1237,6 @@ cardos5_decipher(sc_card_t *card, const unsigned char *data, size_t data_len,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	sc_log(card->ctx, "XXX outlen=%zu", outlen);
-
 	payload_len = data_len + 1;
 	payload = calloc(1, payload_len);
 	if (payload == NULL) {
