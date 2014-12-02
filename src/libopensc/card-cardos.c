@@ -1228,7 +1228,8 @@ cardos_logout(sc_card_t *card)
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_2C
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_3
 		   	|| card->type == SC_CARD_TYPE_CARDOS_M4_4
-			|| card->type == SC_CARD_TYPE_CARDOS_V5_0) {
+			|| card->type == SC_CARD_TYPE_CARDOS_V5_0
+			|| card->type == SC_CARD_TYPE_CARDOS_V5_3) {
 		sc_apdu_t apdu;
 		int       r;
 		sc_path_t path;
