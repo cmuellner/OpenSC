@@ -758,9 +758,7 @@ cardos5_select_file(sc_card_t *card, const sc_path_t *path,
 
 	r = parse_arl(card, file, file->sec_attr, file->sec_attr_len);
 	if (r != SC_SUCCESS) {
-		sc_file_free(file);
 		sc_log(card->ctx, "could not parse arl");
-		return r;
 	}
 
 	*file_out = file;
