@@ -1540,11 +1540,6 @@ cardos5_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 static int
 cardos5_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
-	if (data->pin_reference & BACKTRACK_PIN) {
-		sc_log(card->ctx, "pin with backtrack bit set");
-		return SC_ERROR_INCORRECT_PARAMETERS;
-	}
-
 	data->pin_reference |= BACKTRACK_PIN;
 
 	return iso_ops->pin_cmd(card, data, tries_left);
