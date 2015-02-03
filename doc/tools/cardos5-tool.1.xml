@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<refentry id="cardos5-tool">
+
+<!---
+ * Copyright (c) 2015 Pedro Martelletto
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ *
+ * Alternatively, this file may be distributed under the terms of the GNU
+ * Lesser General Public License (LGPL) version 2.1.
+-->
+
+<refentryinfo>
+  <copyright>
+    <year>2015</year>
+  </copyright>
+  <author>
+    <firstname>Pedro</firstname>
+    <surname>Martelletto</surname>
+  </author>
+  <author>
+    <firstname>Hans-Joerg</firstname>
+    <surname>Hoexer</surname>
+  </author>
+</refentryinfo>
+
+<refmeta>
+  <refentrytitle>cardos5-tool</refentrytitle>
+  <manvolnum>1</manvolnum>
+  <refmiscinfo class="productname">OpenSC</refmiscinfo>
+  <refmiscinfo class="manual">OpenSC Tools</refmiscinfo>
+  <refmiscinfo class="source">opensc</refmiscinfo>
+</refmeta>
+
+<refnamediv>
+  <refname>cardos5-tool</refname>
+  <refpurpose>control a CardOS 5.0/5.3 smartcard
+  </refpurpose>
+</refnamediv>
+
+<refsynopsisdiv>
+  <cmdsynopsis>
+    <command>cardos5-tool</command>
+    <group choice="opt">
+      <arg choice="plain">
+        <option>-CEFKvW</option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-a <replaceable>apdu</replaceable></option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-d <replaceable>curve_der</replaceable></option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-k <replaceable>key</replaceable></option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-o <replaceable>curve_oid</replaceable></option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-p <replaceable>pin</replaceable></option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-r <replaceable>reader</replaceable></option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-s <replaceable>seed</replaceable></option>
+      </arg>
+    </group>
+  </cmdsynopsis>
+</refsynopsisdiv>
+
+<refsect1>
+  <title>Description</title>
+  <para>
+  The <command>cardos5-tool</command> program controls a CardOS 5.0/5.3
+  smartcard, allowing the card to have its contents erased, to be formatted,
+  to have an elliptic curve configured or its startkey changed.
+  </para>
+  <para>
+  At least one option must be specified. The options are as follows:
+  </para>
+
+  <para>
+    <variablelist>
+      <varlistentry>
+        <term>
+          <option>-C</option>
+        </term>
+        <listitem>
+          <para>
+          Configure an elliptic curve on the card. At the moment only one
+          curve can be configured on the card at a given time, and configuring
+          a new curve overrides a previously configured one. The Security
+          Officer PIN must be provided through option <option>-p</option>. The
+          parameters of the curve to be configured on the card are supplied
+          through options <option>-d</option> and <option>-o</option>,
+          which must both be specified as illustrated in the following example:
+          </para>
+          <para>
+          <command>
+          # openssl ecparam -name brainpoolP512r1 -param_enc named_curve
+          -outform DER -out /tmp/oid
+          </command>
+          </para>
+          <para>
+          <command>
+          # openssl ecparam -name brainpoolP512r1 -param_enc explicit -outform
+          DER -out /tmp/der
+          </command>
+          </para>
+          <para>
+          <command>
+          #  cardos5-tool -C -o /tmp/oid -d /tmp/der -p
+          <group><replaceable>Security Officer PIN</replaceable></group>
+          </command>
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-E</option>
+        </term>
+        <listitem>
+          <para>
+          Perform a full erase of the card contents.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-F</option>
+        </term>
+        <listitem>
+          <para>
+          Format the card, erasing its contents. The card must be in
+          operational or in administration mode.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-K</option>
+        </term>
+        <listitem>
+          <para>
+	  Switch the card's startkey using the encrypted APDU payload provided
+	  through the <option>-a</option> option.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-v</option>
+        </term>
+        <listitem>
+          <para>
+          Increase verbosity. This option may be specified more than once.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-W</option>
+        </term>
+        <listitem>
+          <para>
+          Wait for the card to be inserted in the smartcard reader.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-a</option> <replaceable>apdu</replaceable>
+        </term>
+        <listitem>
+          <para>
+	  Use <replaceable>apdu</replaceable> as the path of a local file
+	  containing the payload of an encrypted APDU to be used when switching
+	  the startkey.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-d</option> <replaceable>curve_der</replaceable>
+        </term>
+        <listitem>
+          <para>
+          Use <replaceable>curve_der</replaceable> as the path of a local file
+          containing the parameters of the elliptic curve to be configured
+          on the card.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-k</option> <replaceable>key</replaceable>
+        </term>
+        <listitem>
+          <para>
+	  Use <replaceable>key</replaceable> as the path of a local file
+	  containing the startkey to be used when formatting (option
+	  <option>-F</option>) or erasing (option <option>-E</option>) the
+	  contents of the  card.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-o</option> <replaceable>oid</replaceable>
+        </term>
+        <listitem>
+          <para>
+	  Use <replaceable>oid</replaceable> as the path of a local file
+	  containing the OID of the elliptic curve to be configured on the card.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-p</option> <replaceable>pin</replaceable>
+        </term>
+        <listitem>
+          <para>
+	  Use <replaceable>pin</replaceable> as the Security Officer PIN when
+	  configuring an elliptic curve on the card (option
+	  <option>-C</option>).
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-r</option> <replaceable>reader</replaceable>
+        </term>
+        <listitem>
+          <para>
+          Use reader number <replaceable>reader</replaceable>.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-s</option> <replaceable>seed</replaceable>
+        </term>
+        <listitem>
+          <para>
+	  Use <replaceable>seed</replaceable> as the path of a local file
+	  containing the invariant seed to be used with the startkey provided
+	  through option <option>-k</option>.
+          </para>
+        </listitem>
+      </varlistentry>
+    </variablelist>
+  </para>
+</refsect1>
+
+<refsect1 id="seealso">
+  <title>SEE ALSO</title>
+  <para>
+    <citerefentry>
+      <refentrytitle>pkcs15-init</refentrytitle>
+      <manvolnum>8</manvolnum>
+    </citerefentry>,
+    <citerefentry>
+      <refentrytitle>pkcs15-tool</refentrytitle>
+      <manvolnum>8</manvolnum>
+    </citerefentry>
+  </para>
+</refsect1>
+
+</refentry>
