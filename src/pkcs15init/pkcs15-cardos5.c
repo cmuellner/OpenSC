@@ -1470,7 +1470,7 @@ install_ecd(sc_card_t *card, sc_file_t *curvedb, const char *named_curve,
 	int			 curve_nid;
 	int			 r = SC_ERROR_OBJECT_NOT_VALID;
 
-	bzero(&param, sizeof(param));
+	memset(&param, 0, sizeof(param));
 
 	curve_nid = OBJ_sn2nid(named_curve);
 	if (curve_nid == 0 || load_curve(curve_nid, OPENSSL_EC_NAMED_CURVE,

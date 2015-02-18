@@ -685,7 +685,7 @@ extract_curve_parameters(uint8_t *curve_der, ssize_t curve_der_len,
 	uint16_t	 taglen;
 	buf_t		 der;
 
-	bzero(param, sizeof(*param));
+	memset(param, 0, sizeof(*param));
 
 	buf_init(&der, curve_der, curve_der_len);
 
