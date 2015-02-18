@@ -53,7 +53,12 @@
     <command>cardos5-tool</command>
     <group choice="opt">
       <arg choice="plain">
-        <option>-CEFKvW</option>
+        <option>-EFKLvW</option>
+      </arg>
+    </group>
+    <group>
+      <arg choice="plain">
+        <option>-C <replaceable>ecd_slot</replaceable></option>
       </arg>
     </group>
     <group>
@@ -109,17 +114,18 @@
     <variablelist>
       <varlistentry>
         <term>
-          <option>-C</option>
+          <option>-C</option> <replaceable>ecd_slot</replaceable>
         </term>
         <listitem>
           <para>
-          Configure an elliptic curve on the card. At the moment only one
-          curve can be configured on the card at a given time, and configuring
-          a new curve overrides a previously configured one. The Security
-          Officer PIN must be provided through option <option>-p</option>. The
-          parameters of the curve to be configured on the card are supplied
-          through options <option>-d</option> and <option>-o</option>,
-          which must both be specified as illustrated in the following example:
+          Configure an elliptic curve on the card. Curves are configured in
+          slots, and configuring a new curve in a given slot overrides any
+          previously configured curve in the same slot. Slots are represented
+          numerically, ranging from 0 to 255. The Security Officer PIN must be
+          provided through option <option>-p</option>. The parameters of the
+          curve to be configured on the card are supplied through options
+          <option>-d</option> and <option>-o</option>, which must both be
+          specified as illustrated in the following example:
           </para>
           <para>
           <command>
@@ -135,7 +141,7 @@
           </para>
           <para>
           <command>
-          #  cardos5-tool -C -o /tmp/oid -d /tmp/der -p
+          #  cardos5-tool -C 5 -o /tmp/oid -d /tmp/der -p
           <group><replaceable>Security Officer PIN</replaceable></group>
           </command>
           </para>
@@ -170,6 +176,16 @@
           <para>
 	  Switch the card's startkey using the encrypted APDU payload provided
 	  through the <option>-a</option> option.
+          </para>
+        </listitem>
+      </varlistentry>
+      <varlistentry>
+        <term>
+          <option>-L</option>
+        </term>
+        <listitem>
+          <para>
+          List configured elliptic curves.
           </para>
         </listitem>
       </varlistentry>
