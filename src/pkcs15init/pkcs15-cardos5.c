@@ -1,5 +1,8 @@
 /*
- * Copyright (c) 2014 Pedro Martelletto <pedro@ambientworks.net>
+ * Copyright (c) 2014, 2015 genua mbH.
+ * All rights reserved.
+ *
+ * Written by Pedro Martelletto <pedro@ambientworks.net>.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above

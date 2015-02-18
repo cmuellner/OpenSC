@@ -1,6 +1,8 @@
 /*
- * Copyright (c) 2014 Hans-Joerg Hoexer
- * Copyright (c) 2014 Pedro Martelletto
+ * Copyright (c) 2014, 2015 genua mbH.
+ * All rights reserved.
+ *
+ * Written Pedro Martelletto and Hans-Joerg Hoexer.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
