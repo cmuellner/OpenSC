@@ -122,6 +122,18 @@ filesystem {
                 }
 
 	    }
+
+	EF curvedb {
+	    file-id		= 7EAD;
+	    structure		= linear-variable;
+	    size		= 256;
+	    record-length	= 32;
+	    ACL			= *=NEVER,
+				    READ=NONE,
+				    WRITE=$SOPIN,
+				    UPDATE=$SOPIN,
+				    ERASE=$SOPIN;
+	}
 	}
     }
 }

@@ -74,6 +74,9 @@
 #define CARDOS5_DIRECTORY_INS	0x16
 #define CARDOS5_DIRECTORY_P1	0x02
 
+#define CARDOS5_READ_RECORD_CLA	0x00
+#define CARDOS5_READ_RECORD_INS	0xB2
+
 #define DIR_ENTRY_TAG		0x6F
 #define FILE_ID_TAG		0x86
 #define FILE_NEXT_OFFSET_TAG	0x8A
@@ -231,6 +234,7 @@ struct sc_cardos5_am_byte {
 #define FCP_TAG_DF_SIZE			0xC1
 
 #define FCP_TYPE_BINARY_EF		0x01
+#define FCP_TYPE_LINEAR_VARIABLE_EF	0x04
 #define FCP_TYPE_DF			0x38
 
 #endif /* !_OPENSC_CARD_CARDOS5_H */

@@ -30,6 +30,10 @@
 #include <pkcs15init/pkcs15-init.h>
 #include <pkcs15init/profile.h>
 
+#if !defined(_WIN32)
+#include <arpa/inet.h>  /* for htons() */
+#endif
+
 #include "config.h"
 #include <openssl/aes.h>
 #ifdef HAVE_OPENSSL_CMAC_H
@@ -805,7 +809,7 @@ get_pin(sc_profile_t *profile, int id, const struct sc_pkcs15_auth_info *info,
 }
 
 void
-push_curve_parameters(const struct curve_parameters *p)
+push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 {
 	uint8_t		sha256[32];
 	uint8_t		ecd_buf[512];
@@ -864,7 +868,7 @@ push_curve_parameters(const struct curve_parameters *p)
 
 	buf_init(&payload, payload_buf, sizeof(payload_buf));
 
-	if (asn1_put_tag1(CRT_DO_KEYREF, 0x01, &payload) ||
+	if (asn1_put_tag1(CRT_DO_KEYREF, ecd_slot, &payload) ||
 	    asn1_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
 	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
 	    sizeof(sha256), &payload))
@@ -899,12 +903,17 @@ push_curve_parameters(const struct curve_parameters *p)
 }
 
 void
-configure_curve(const char *curve_oid_path, const char *curve_der_path)
+configure_curve(const char *ecd_slot_str, const char *curve_oid_path,
+    const char *curve_der_path)
 {
 	uint8_t			*curve_der;
 	uint8_t			*curve_oid;
+	uint8_t			 ecd_slot;
 	ssize_t			 curve_der_len;
 	ssize_t			 curve_oid_len;
+#if defined (__Bitrig__) || defined (__OpenBSD__)
+	const char		*errstr;
+#endif
 	struct curve_parameters	 param;
 	int			 r;
 
@@ -915,13 +924,21 @@ configure_curve(const char *curve_oid_path, const char *curve_der_path)
 	if (r != SC_SUCCESS)
 		errx(1, "%s: sc_pkcs15_bind: %s", __func__, sc_strerror(r));
 
+#if defined (__Bitrig__) || defined (__OpenBSD__)
+	ecd_slot = strtonum(ecd_slot_str, 1, UINT8_MAX, &errstr);
+	if (errstr)
+		errx(1, "%s: strtonum %s", __func__, ecd_slot_str);
+#else
+	ecd_slot = (uint8_t)atoi(ecd_slot_str);
+#endif
+
 	load_file(curve_der_path, 0, SSIZE_MAX, &curve_der, &curve_der_len);
 	load_file(curve_oid_path, 0, SSIZE_MAX, &curve_oid, &curve_oid_len);
 
 	extract_curve_parameters(curve_der, curve_der_len, &param);
 	extract_curve_oid(curve_oid, curve_oid_len, &param);
 
-	push_curve_parameters(&param);
+	push_curve_parameters(&param, ecd_slot);
 
 	free(curve_der);
 	free(curve_oid);
@@ -1118,9 +1135,9 @@ extern char	*__progname;
 void
 usage(void)
 {
-	fprintf(stderr, "usage: %s [-CEFhKvW] [-a apdu] [-d curve_der] "
-	    "[-k key] [-o curve_oid] [-p pin] [-r reader] [-s seed]\n",
-	    __progname);
+	fprintf(stderr, "usage: %s [-EFhKLvW] [-C ecd_slot] [-a apdu] "
+	    "[-d curve_der] [-k key] [-o curve_oid] [-p pin] [-r reader] "
+	    "[-s seed]\n", __progname);
 	exit(1);
 }
 
@@ -1160,6 +1177,26 @@ disconnect_card(sc_context_t *ctx)
 	sc_release_context(ctx);
 }
 
+void
+list_curves(void)
+{
+	char buf[128];
+	sc_path_t path;
+	int r;
+
+	/* XXX hardcoded since we can't call sc_profile_get_file(). */
+	sc_format_path("3F0050157EAD", &path);
+	r = sc_select_file(card, &path, NULL);
+	if (r != SC_SUCCESS)
+		errx(1, "%s: sc_select_file", __func__);
+
+	while ((r = sc_read_record(card, 0, (uint8_t *)buf,
+	    sizeof(buf) - 1, SC_RECORD_NEXT)) > 0) {
+		buf[127] = '\0';
+		printf("%s\n", buf);
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1169,22 +1206,25 @@ main(int argc, char **argv)
 	int		do_key = 0;
 	int		do_wait = 0;
 	int		do_info = 0;
+	int		do_list_curves = 0;
 	int		verbosity = 0;
 	int		ch;
 	const char	*apdu = NULL;
 	const char	*startkey = NULL;
+	const char	*ecd_slot = NULL;
 	const char	*curve_der = NULL;
 	const char	*curve_oid = NULL;
 	const char	*reader = NULL;
 	sc_context_t	*ctx = NULL;
 
-	while ((ch = getopt(argc, argv, "a:Cd:EFhIKk:o:p:r:s:vW")) != -1)
+	while ((ch = getopt(argc, argv, "a:C:d:EFhIKk:Lo:p:r:s:vW")) != -1)
 		switch (ch) {
 		case 'a':
 			once(ch, &apdu, optarg);
 			break;
 		case 'C':
 			do_curve = 1;
+			once(ch, &ecd_slot, optarg);
 			break;
 		case 'd':
 			once(ch, &curve_der, optarg);
@@ -1206,6 +1246,9 @@ main(int argc, char **argv)
 			break;
 		case 'k':
 			once(ch, &startkey, optarg);
+			break;
+		case 'L':
+			do_list_curves = 1;
 			break;
 		case 'o':
 			once(ch, &curve_oid, optarg);
@@ -1245,9 +1288,11 @@ main(int argc, char **argv)
 	if (do_format)
 		format(startkey);
 	if (do_curve)
-		configure_curve(curve_oid, curve_der);
+		configure_curve(ecd_slot, curve_oid, curve_der);
 	if (do_info)
 		get_info();
+	if (do_list_curves)
+		list_curves();
 
 	disconnect_card(ctx);
 

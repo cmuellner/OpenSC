@@ -332,6 +332,41 @@ cardos5_finish(sc_card_t *card)
 }
 
 static int
+cardos5_read_record(sc_card_t *card, unsigned int record_number, uint8_t *buf,
+    size_t buf_len, unsigned long flags)
+{
+	struct sc_context	*ctx = card->ctx;
+	sc_apdu_t		 apdu;
+	int			 r;
+
+	memset(&apdu, 0, sizeof(apdu));
+	apdu.cse = SC_APDU_CASE_2_SHORT;
+	apdu.cla = CARDOS5_READ_RECORD_CLA;
+	apdu.ins = CARDOS5_READ_RECORD_INS;
+	apdu.p1 = record_number;
+	apdu.resp = buf;
+	apdu.resplen = buf_len;
+	apdu.le = buf_len;
+
+	if (flags & SC_RECORD_BY_REC_NR)
+		apdu.p2 = 0x04;
+	else if (flags & SC_RECORD_NEXT)
+		apdu.p2 = 0x02;
+
+	if ((r = sc_transmit_apdu(card, &apdu)) != SC_SUCCESS) {
+		sc_log(ctx, "tx/rx error");
+		return r;
+	}
+
+	if ((r = sc_check_sw(card, apdu.sw1, apdu.sw2)) != SC_SUCCESS) {
+		sc_log(ctx, "command failed");
+		return r;
+	}
+
+	return (int)apdu.resplen;
+}
+
+static int
 parse_entry(struct sc_context *ctx, buf_t *entries, uint8_t *entry_buf,
     uint16_t entry_len, uint8_t *next_offset)
 {
@@ -877,13 +912,19 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 static int
 construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
 {
+	uint8_t file_type;
 	uint8_t	ef_size[2];
 	uint8_t	arl_buf[96];
 	buf_t	arl;
 	int	i;
 
-	if (ef->ef_structure != SC_FILE_EF_TRANSPARENT) {
-		sc_log(card->ctx, "unsupported ef type %u", ef->type);
+	if (ef->ef_structure == SC_FILE_EF_TRANSPARENT)
+		file_type = FCP_TYPE_BINARY_EF;
+	else if (ef->ef_structure == SC_FILE_EF_LINEAR_VARIABLE)
+		file_type = FCP_TYPE_LINEAR_VARIABLE_EF;
+	else {
+		sc_log(card->ctx, "unsupported ef structure %u",
+		    ef->ef_structure);
 		return SC_ERROR_NOT_SUPPORTED;
 	}
 
@@ -895,7 +936,7 @@ construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
 	ef_size[0] = (ef->size >> 8) & 0xff;
 	ef_size[1] = (ef->size & 0xff);
 
-	if (asn1_put_tag1(FCP_TAG_DESCRIPTOR, FCP_TYPE_BINARY_EF, fcp) ||
+	if (asn1_put_tag1(FCP_TAG_DESCRIPTOR, file_type, fcp) ||
 	    asn1_put_tag(FCP_TAG_EF_SIZE, ef_size, sizeof(ef_size), fcp) ||
 	    asn1_put_tag0(FCP_TAG_EF_SFID, fcp)) {
 		sc_log(card->ctx, "asn1 error");
@@ -1566,6 +1607,7 @@ sc_get_cardos5_driver(void)
 	cardos5_ops.match_card = cardos5_match_card;
 	cardos5_ops.init = cardos5_init;
 	cardos5_ops.finish = cardos5_finish;
+	cardos5_ops.read_record = cardos5_read_record;
 	cardos5_ops.process_fci = cardos5_process_fci;
 	cardos5_ops.select_file = cardos5_select_file;
 	cardos5_ops.create_file = cardos5_create_file;
@@ -1573,7 +1615,6 @@ sc_get_cardos5_driver(void)
 	cardos5_ops.restore_security_env = cardos5_restore_security_env;
 	cardos5_ops.decipher = cardos5_decipher;
 	cardos5_ops.compute_signature = cardos5_compute_signature;
-
 	cardos5_ops.list_files = cardos5_list_files;
 	cardos5_ops.check_sw = cardos4_ops->check_sw;
 	cardos5_ops.card_ctl = cardos5_card_ctl;

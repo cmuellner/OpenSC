@@ -1042,6 +1042,8 @@ int sc_erase_binary(struct sc_card *card, unsigned int idx,
 #define SC_RECORD_BY_REC_ID		0x00000UL
 /** use the specified record number */
 #define SC_RECORD_BY_REC_NR		0x00100UL
+/** use the next available record */
+#define SC_RECORD_NEXT			0x00200UL
 /** use currently selected record */
 #define SC_RECORD_CURRENT		0UL
 

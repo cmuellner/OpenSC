@@ -28,14 +28,23 @@
 #include <string.h>
 #include <stdarg.h>
 
+#ifdef ENABLE_OPENSSL
+#include <openssl/objects.h>
+#include <openssl/ec.h>
+#endif
+
 #include "libopensc/opensc.h"
 #include "libopensc/card-cardos5.h"
 #include "libopensc/cardctl.h"
 #include "libopensc/log.h"
 #include "libopensc/cards.h"
 #include "libopensc/asn1.h"
+#include "common/compat_strlcpy.h"
+#include "common/compat_strlcat.h"
 #include "pkcs15-init.h"
 #include "profile.h"
+
+#define CURVEDB	"curvedb"
 
 typedef struct {
 	size_t				bytes;
@@ -237,6 +246,62 @@ store_pin(sc_profile_t *profile, sc_card_t *card,
 	args.len = payload.bytes_used;
 
 	return sc_card_ctl(card, SC_CARDCTL_CARDOS_PUT_DATA_OCI, &args);
+}
+
+static int
+cardos5_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
+    sc_file_t *df)
+{
+	struct sc_cardctl_cardos_obj_info	 args;
+	struct sc_card				*card = p15card->card;
+	struct sc_file				*file = NULL;
+	uint8_t					 payload_buf[8];
+	buf_t					 payload;
+	int					 r;
+
+	r = sc_pkcs15init_create_file(profile, p15card, df);
+	if (r != SC_SUCCESS)
+		return r;
+
+	r = sc_select_file(card, &df->path, NULL);
+	if (r != SC_SUCCESS)
+		return r;
+
+	buf_init(&payload, payload_buf, sizeof(payload_buf));
+
+	/* XXX do we need to specify an ARL for this SE object? */
+	if (asn1_put_tag1(CRT_DO_KEYREF, 0x01, &payload)) {
+		sc_log(card->ctx, "asn1 error");
+		return SC_ERROR_BUFFER_TOO_SMALL;
+	}
+
+	args.data = payload_buf;
+	args.len = payload.bytes_used;
+
+	r = sc_pkcs15init_set_lifecycle(card, SC_CARDCTRL_LIFECYCLE_ADMIN);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "couldn't switch card to admin lifecycle");
+		return r;
+	}
+
+	r = sc_card_ctl(card, SC_CARDCTL_CARDOS_PUT_DATA_SECI, &args);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "couldn't create empty SE");
+		return r;
+	}
+
+	r = sc_profile_get_file(profile, CURVEDB, &file);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "profile doesn't define curve database");
+		return SC_SUCCESS; /* curvedb is optional */
+	}
+
+	r = sc_pkcs15init_create_file(profile, p15card, file);
+	sc_file_free(file);
+	if (r != SC_SUCCESS)
+		sc_log(card->ctx, "couldn't create curve database");
+
+	return r;
 }
 
 static int
@@ -1163,6 +1228,393 @@ generate_rsa_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 }
 
 static int
+load_curve(int nid, int asn1_flag, uint8_t **data, ssize_t *data_len)
+{
+	BIO			*mem = NULL;
+	char			*mem_ptr;
+	long			 mem_len;
+	EC_GROUP		*group = NULL;
+	point_conversion_form_t	 form = POINT_CONVERSION_UNCOMPRESSED;
+	int			 r = 1;
+
+	mem = BIO_new(BIO_s_mem());
+	if (mem == NULL)
+		goto out;
+
+	group = EC_GROUP_new_by_curve_name(nid);
+	if (group == NULL)
+		goto out;
+
+	EC_GROUP_set_asn1_flag(group, asn1_flag);
+	EC_GROUP_set_point_conversion_form(group, form);
+
+	if (i2d_ECPKParameters_bio(mem, group) == 0)
+		goto out;
+
+	mem_len = BIO_get_mem_data(mem, &mem_ptr);
+	if (mem_len < 0)
+		goto out;
+
+	*data = malloc(mem_len);
+	if (*data == NULL)
+		goto out;
+
+	memcpy(*data, mem_ptr, mem_len);
+	*data_len = mem_len;
+
+	r = 0;
+out:
+	if (mem != NULL)
+		BIO_free(mem);
+	if (group != NULL)
+		EC_GROUP_free(group);
+
+	return r;
+}
+
+/*
+ * Poor man's DER parser. The format used to encode curve parameters seems
+ * simple enough to warrant a quick reimplementation. It certainly appears to
+ * be easier (and better) than to rely on OpenSSL's parser, anyway.
+ *
+ * The syntax expected here was obtained from:
+ * http://www.ecc-brainpool.org/download/Domain-parameters.pdf, page 34.
+ */
+
+#define INTEGER_TAG		0x02
+#define BIT_STRING_TAG		0x03
+#define OCTET_STRING_TAG	0x04
+#define OID_TAG			0x06
+#define SEQUENCE_TAG		0x30
+
+struct obj {
+	uint8_t		*data;
+	uint16_t	 len;
+};
+
+struct curve_parameters {
+	struct obj	oid;
+	struct obj	p;
+	struct obj	a;
+	struct obj	b;
+	struct obj	g;
+	struct obj	r;
+	struct obj	f;
+};
+
+static int
+decode_curve_parameters(sc_card_t *card, uint8_t *curve_der,
+    ssize_t curve_der_len, struct curve_parameters *param)
+{
+	uint8_t		*tag = NULL;
+	uint16_t	 taglen;
+	buf_t		 der;
+	int		 r = SC_ERROR_OBJECT_NOT_VALID;
+
+	buf_init(&der, curve_der, curve_der_len);
+
+	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der))
+		goto out;
+
+	/* XXX What is the meaning of this INTEGER tag set to 1? */
+	if (bertlv_get_tag(INTEGER_TAG, &tag, &taglen, &der) ||
+	    taglen != 1 || tag[0] != 0x01)
+		goto out;
+
+	/* OID and P are grouped in a sequence. */
+	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    bertlv_get_tag(OID_TAG, &param->oid.data, &param->oid.len, &der) ||
+	    bertlv_get_tag(INTEGER_TAG, &param->p.data, &param->p.len, &der))
+		goto out;
+
+	/* A and B are grouped in a sequence. */
+	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    bertlv_get_tag(OCTET_STRING_TAG, &param->a.data, &param->a.len,
+	    &der) || bertlv_get_tag(OCTET_STRING_TAG, &param->b.data,
+	    &param->b.len, &der))
+		goto out;
+
+	free(tag);
+	tag = NULL;
+
+	/* Some curves have an optional seed value: skip it. */
+	if (der.ptr[0] == BIT_STRING_TAG && bertlv_get_tag(BIT_STRING_TAG, &tag,
+	    &taglen, &der))
+		goto out;
+
+	/* G, R and F are ungrouped, but appear sequentially. */
+	if (bertlv_get_tag(OCTET_STRING_TAG, &param->g.data, &param->g.len,
+	    &der) || bertlv_get_tag(INTEGER_TAG, &param->r.data, &param->r.len,
+	    &der) || bertlv_get_tag(INTEGER_TAG, &param->f.data, &param->f.len,
+	    &der))
+		goto out;
+
+	/* Make sure that we consumed the whole buffer. */
+	if (der.size != der.bytes_used)
+		goto out;
+
+	r = SC_SUCCESS;
+out:
+	if (tag != NULL)
+		free(tag);
+
+	return r;
+}
+
+static int
+decode_curve_oid(sc_card_t *card, uint8_t *curve_oid, ssize_t curve_oid_len,
+    struct curve_parameters *param)
+{
+	buf_t	oid;
+
+	/* free oid obtained by decode_curve_parameters() */
+	free(param->oid.data);
+	param->oid.data = NULL;
+
+	buf_init(&oid, curve_oid, curve_oid_len);
+
+	if (bertlv_get_tag(OID_TAG, &param->oid.data, &param->oid.len, &oid))
+		return SC_ERROR_OBJECT_NOT_VALID;
+
+	return SC_SUCCESS;
+}
+
+static int
+push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
+    uint8_t ecd_id)
+{
+	struct sc_cardctl_cardos_obj_info	args;
+	uint8_t		sha256[32];
+	uint8_t		ecd_buf[512];
+	uint8_t		obj_buf[512];
+	uint8_t		payload_buf[512];
+	buf_t		ecd;
+	buf_t		obj;
+	buf_t		payload;
+	int		r;
+
+	/*
+	 * First, we build an Elliptic Curve Domain object with the curve
+	 * parameters obtained from the curve's DER file.
+	 */
+
+	buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
+
+        if (bertlv_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
+	    bertlv_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
+	    bertlv_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
+	    bertlv_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
+	    bertlv_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
+	    bertlv_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
+	    bertlv_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
+		return SC_ERROR_BUFFER_TOO_SMALL;
+
+	/*
+	 * We then wrap this ECD object inside a CONSTRUCTED_DATA_TAG object.
+	 * We push this object to the card and retrieve its SHA256 hash.
+	 */
+
+	buf_init(&obj, obj_buf, sizeof(obj_buf));
+
+        if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
+		return SC_ERROR_BUFFER_TOO_SMALL;
+
+	r = push_obj(card, obj_buf, obj.bytes_used, sha256);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "could not push ecd, r=%d", r);
+		return r;
+	}
+
+	/*
+	 * Finally, we build the APDU payload (containing the hash) and send it.
+	 */
+
+	buf_init(&payload, payload_buf, sizeof(payload_buf));
+
+	if (asn1_put_tag1(CRT_DO_KEYREF, ecd_id, &payload) ||
+	    asn1_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
+	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
+	    sizeof(sha256), &payload))
+		return SC_ERROR_BUFFER_TOO_SMALL;
+
+	memset(&args, 0, sizeof(args));
+	args.data = payload_buf;
+	args.len = payload.bytes_used;
+
+	return sc_card_ctl(card, SC_CARDCTL_CARDOS_PUT_DATA_ECD, &args);
+}
+
+#ifndef ENABLE_OPENSSL
+static int
+install_ecd(sc_card_t *card, sc_file_t *curvedb, const char *named_curve,
+    const char *entry, uint8_t ecd_id)
+{
+	sc_log(card->ctx, "openssl not compiled in: not installing ecd");
+	return SC_SUCCESS;
+}
+#else
+static int
+install_ecd(sc_card_t *card, sc_file_t *curvedb, const char *named_curve,
+    const char *entry, uint8_t ecd_id)
+{
+
+	uint8_t			*curve_der = NULL;
+	uint8_t			*curve_oid = NULL;
+	ssize_t			 curve_der_len;
+	ssize_t			 curve_oid_len;
+	struct curve_parameters	 param;
+	int			 curve_nid;
+	int			 r = SC_ERROR_OBJECT_NOT_VALID;
+
+	bzero(&param, sizeof(param));
+
+	curve_nid = OBJ_sn2nid(named_curve);
+	if (curve_nid == 0 || load_curve(curve_nid, OPENSSL_EC_NAMED_CURVE,
+	    &curve_oid, &curve_oid_len) || load_curve(curve_nid, 0,
+	    &curve_der, &curve_der_len)) {
+		sc_log(card->ctx, "couldn't extract curve from openssl");
+		goto out;
+	}
+
+	if (decode_curve_parameters(card, curve_der, curve_der_len, &param) ||
+	    decode_curve_oid(card, curve_oid, curve_oid_len, &param)) {
+		sc_log(card->ctx, "couldn't decode curve parameters");
+		goto out;
+	}
+
+	r = push_curve_parameters(card, &param, ecd_id);
+	if (r != SC_SUCCESS)
+		sc_log(card->ctx, "failed to install ecd object");
+
+out:
+	if (curve_der != NULL)
+		free(curve_der);
+	if (curve_oid != NULL)
+		free(curve_oid);
+	if (param.oid.data != NULL)
+		free(param.oid.data);
+	if (param.p.data != NULL)
+		free(param.p.data);
+	if (param.a.data != NULL)
+		free(param.a.data);
+	if (param.b.data != NULL)
+		free(param.b.data);
+	if (param.g.data != NULL)
+		free(param.g.data);
+	if (param.r.data != NULL)
+		free(param.r.data);
+	if (param.f.data != NULL)
+		free(param.f.data);
+
+	return r;
+}
+#endif /* !ENABLE_OPENSSL */
+
+/*
+ * For Elliptic Curve keys, we need to make sure the card knows about the curve
+ * and its parameters. In CardOS 5, an elliptic curve is defined by an Elliptic
+ * Curve Domain (ECD) object. These objects can only be installed, and not read.
+ * In order to keep track of configured curves, we keep a "curvedb" file on the
+ * card with a list of ECD objects. Each entry on this list consists of a
+ * string of the form "named_curve/curve_oid", as in "brainpoolP512r1/06:09:2b:
+ * 24:03:03:02:08:01:01:0d". Curves found on this list are assumed to have a
+ * backing ECD object configured on the card.
+ */
+static int
+lookup_ecd(sc_profile_t *profile, sc_card_t *card,
+    const sc_pkcs15_prkey_info_t *keyinfo)
+{
+	struct sc_pkcs15_ec_parameters	*param;
+	sc_file_t			*curvedb = NULL;
+	char				 entry[128];
+	char				 buf[128];
+	char				 tmp[4];
+	uint8_t				 ecd_id = 1;
+	size_t				 i;
+	int				 n;
+	int				 r;
+
+	if (keyinfo->params.len != sizeof(struct sc_pkcs15_ec_parameters)) {
+		sc_log(card->ctx, "invalid keyinfo->params.len=%zu",
+		    keyinfo->params.len);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	param = (struct sc_pkcs15_ec_parameters *)keyinfo->params.data;
+	if (param == NULL || param->named_curve == NULL ||
+	    param->der.value == NULL) {
+		sc_log(card->ctx, "invalid param=%p", param);
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	strlcpy(entry, param->named_curve, sizeof(entry));
+	strlcat(entry, "/", sizeof(entry));
+
+	for (i = 0; i < param->der.len; i++) {
+		n = snprintf(tmp, sizeof(tmp), "%s%02x", i == 0 ? "" : ":",
+		    param->der.value[i]);
+		if (n < 0 || (size_t)n >= sizeof(tmp)) {
+			sc_log(card->ctx, "snprintf failed");
+			return 0;
+		}
+		strlcat(entry, tmp, sizeof(entry));
+	}
+
+	r = sc_profile_get_file(profile, CURVEDB, &curvedb);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "profile doesn't define curve database");
+		return r;
+	}
+
+	r = sc_select_file(card, &curvedb->path, NULL);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "couldn't select curve database");
+		goto out;
+	}
+
+	while ((r = sc_read_record(card, 0, (uint8_t *)buf,
+	    sizeof(buf) - 1, SC_RECORD_NEXT)) > 0) {
+		buf[127] = '\0';
+		if (++ecd_id == 0) {
+			r = SC_ERROR_INVALID_ARGUMENTS;
+			sc_log(card->ctx, "ecd_id > UINT8_MAX");
+			goto out;
+
+		}
+		if (strcmp(buf, entry) == 0) {
+			r = 0; /* entry found; curve configured */
+			goto out;
+		}
+	}
+
+	r = sc_pkcs15init_set_lifecycle(card, SC_CARDCTRL_LIFECYCLE_ADMIN);
+	if (r != SC_SUCCESS)
+		goto out;
+
+	r = install_ecd(card, curvedb, param->named_curve, entry, ecd_id);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "failed to install ecd object");
+		goto out;
+	}
+
+	r = sc_select_file(card, &curvedb->path, NULL);
+	if (r != SC_SUCCESS) {
+		sc_log(card->ctx, "couldn't select curve database");
+		goto out;
+	}
+
+	r = sc_append_record(card, (uint8_t *)entry, strlen(entry), 0);
+	if (r < 0 || (size_t)r != strlen(entry))
+		sc_log(card->ctx, "couldn't append record");
+
+out:
+	if (curvedb != NULL)
+		sc_file_free(curvedb);
+
+	return r;
+}
+
+static int
 generate_ec_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
     sc_pkcs15_object_t *obj, sc_pkcs15_pubkey_t *pubkey)
 {
@@ -1201,6 +1653,8 @@ generate_ec_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		sc_log(ctx, "sc_pkcs15init_authenticate failed, r=%d", r);
 		return r;
 	}
+
+	lookup_ecd(profile, p15card->card, keyinfo);
 
 	memset(dummyQ, 0xFF, sizeof(dummyQ));
 	memset(dummyD, 0xFF, sizeof(dummyD));
@@ -1341,6 +1795,7 @@ sc_pkcs15init_get_cardos5_ops(void)
 		cardos4_ops = sc_pkcs15init_get_cardos_ops();
 
 	cardos5_ops = *cardos4_ops;
+	cardos5_ops.create_dir = cardos5_create_dir;
 	cardos5_ops.create_pin = cardos5_create_pin;
 	cardos5_ops.generate_key = cardos5_generate_key;
 	cardos5_ops.store_key = cardos5_store_key;
