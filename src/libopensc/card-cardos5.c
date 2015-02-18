@@ -367,6 +367,75 @@ cardos5_read_record(sc_card_t *card, unsigned int record_number, uint8_t *buf,
 }
 
 static int
+cardos5_read_binary(sc_card_t *card, unsigned int idx, uint8_t *buf,
+    size_t len, unsigned long flags)
+{
+	struct sc_context	*ctx = card->ctx;
+	sc_apdu_t		 apdu;
+	uint8_t			 recvbuf[768];
+	size_t			 done = 0;
+	size_t			 n;
+	int			 r;
+
+	while (done < len) {
+		if (idx > 0x7fff) {
+			sc_log(card->ctx, "invalid EF offset: 0x%x", idx);
+			return SC_ERROR_OFFSET_TOO_LARGE;
+		}
+
+		/*
+		 * We need to read in big chunks, otherwise we might miss the
+		 * status word!
+		 */
+
+		memset(&apdu, 0, sizeof(apdu));
+		apdu.cse = SC_APDU_CASE_2;
+		apdu.cla = CARDOS5_READ_BINARY_CLA;
+		apdu.ins = CARDOS5_READ_BINARY_INS;
+		apdu.p1 = (idx >> 8) & 0x7f;
+		apdu.p2 = idx & 0xff;
+		apdu.le = sizeof(recvbuf);
+		apdu.resp = recvbuf;
+		apdu.resplen = sizeof(recvbuf);
+
+		if ((r = sc_transmit_apdu(card, &apdu)) != SC_SUCCESS) {
+			sc_log(ctx, "tx/rx error");
+			return r;
+		}
+
+		r = sc_check_sw(card, apdu.sw1, apdu.sw2);
+		if (r != SC_SUCCESS && /* 0x6282 == EOF */
+		    (apdu.sw1 != 0x62 || apdu.sw2 != 0x82)) {
+			sc_log(ctx, "command failed, r=%d", r);
+			return r;
+		}
+
+		/*
+		 * Figure out how much to copy: apdu.resplen contains the
+		 * length of the data given to us by the card, while len - done 
+		 * represents the amount of I/O left to do.
+		 */
+
+		if (apdu.resplen > sizeof(recvbuf)) {
+			sc_log(ctx, "invalid reply length: %zu", apdu.resplen);
+			return SC_ERROR_UNKNOWN_DATA_RECEIVED;
+		}
+
+		n = len - done;
+		if (n > apdu.resplen)
+			n = apdu.resplen;
+
+		memcpy(buf, recvbuf, n);
+
+		buf += n;
+		idx += n;
+		done += n;
+	}
+
+	return done;
+}
+
+static int
 parse_entry(struct sc_context *ctx, buf_t *entries, uint8_t *entry_buf,
     uint16_t entry_len, uint8_t *next_offset)
 {
@@ -1491,6 +1560,12 @@ extract_key(sc_card_t *card, struct sc_cardctl_cardos5_genkey_info *args)
 	return SC_SUCCESS;
 }
 
+/*
+ * We inform the card that the expected maximum length of a APDU's data field
+ * is 0x0300 (768). This is needed for 4096-bit RSA keys, which are large, and
+ * also allows us to perform certain operations (e.g. reads) with fewer
+ * transactions.
+ */
 static int
 init_card(sc_card_t *card)
 {
@@ -1608,6 +1683,7 @@ sc_get_cardos5_driver(void)
 	cardos5_ops.init = cardos5_init;
 	cardos5_ops.finish = cardos5_finish;
 	cardos5_ops.read_record = cardos5_read_record;
+	cardos5_ops.read_binary = cardos5_read_binary;
 	cardos5_ops.process_fci = cardos5_process_fci;
 	cardos5_ops.select_file = cardos5_select_file;
 	cardos5_ops.create_file = cardos5_create_file;
