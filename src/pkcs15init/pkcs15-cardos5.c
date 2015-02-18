@@ -136,7 +136,7 @@ add_acl_tag(uint8_t am_byte, unsigned int ac, int key_ref, buf_t *buf)
 	case SC_AC_CHV:
 	case SC_AC_TERM:
 	case SC_AC_AUT:
-		if (key_ref < 0 || (key_ref & BACKTRACK_PIN) ||
+		if (key_ref < 0 || (key_ref & BACKTRACK_BIT) ||
 		    key_ref > UINT8_MAX)
 			return -1;
 
@@ -625,7 +625,8 @@ store_privkey(sc_card_t *card, int key_id, int algo, int active, int pin_id,
 
 	if (add_acl_tag(AM_KEY_USE, SC_AC_CHV, pin_id, &arl) ||
 	    add_acl_tag(AM_KEY_CHANGE, SC_AC_CHV, pin_id, &arl) ||
-	    add_acl_tag(AM_KEY_OCI_UPD, SC_AC_CHV, pin_id, &arl)) {
+	    add_acl_tag(AM_KEY_OCI_UPD, SC_AC_CHV, pin_id, &arl) ||
+	    add_acl_tag(AM_KEY_DELETE, SC_AC_CHV, pin_id, &arl)) {
 		sc_log(card->ctx, "could not add acl tag");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -659,7 +660,7 @@ cardos_put_rsa_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 
 	pin_ref = sc_pkcs15init_get_pin_reference(p15card, profile,
 	    SC_AC_SYMBOLIC, SC_PKCS15INIT_USER_PIN);
-	if (pin_ref < 0 || pin_ref & BACKTRACK_PIN) {
+	if (pin_ref < 0 || pin_ref & BACKTRACK_BIT) {
 		sc_log(card->ctx, "invalid pin_ref=%d", pin_ref);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
@@ -772,7 +773,7 @@ put_ec_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 
 	pin_ref = sc_pkcs15init_get_pin_reference(p15card, profile,
 	    SC_AC_SYMBOLIC, SC_PKCS15INIT_USER_PIN);
-	if (pin_ref < 0 || pin_ref & BACKTRACK_PIN) {
+	if (pin_ref < 0 || pin_ref & BACKTRACK_BIT) {
 		sc_log(card->ctx, "invalid pin reference 0x%x", pin_ref);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
@@ -1786,6 +1787,72 @@ cardos5_init_card(sc_profile_t *profile, sc_pkcs15_card_t *p15card)
 	return sc_card_ctl(p15card->card, SC_CARDCTL_CARDOS_INIT_CARD, NULL);
 }
 
+static int
+cardos5_delete_object(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
+    struct sc_pkcs15_object *obj, const  struct sc_path *path)
+{
+	sc_file_t		*file = NULL;
+	sc_pkcs15_prkey_info_t	*keyinfo = obj->data;
+	struct sc_context	*ctx = p15card->card->ctx;
+	int			 pin_id;
+	int			 r;
+
+	/* If we're removing a private key, explicitly invalidate it. */
+	if ((obj->type & SC_PKCS15_TYPE_CLASS_MASK) == SC_PKCS15_TYPE_PRKEY) {
+		r = sc_pkcs15init_set_lifecycle(p15card->card,
+		    SC_CARDCTRL_LIFECYCLE_ADMIN);
+		if (r != SC_SUCCESS) {
+			sc_log(ctx, "sc_pkcs15init_set_lifecycle: r=%d", r);
+			return r;
+		}
+		r = sc_select_file(p15card->card, &keyinfo->path, NULL);
+		if (r != SC_SUCCESS) {
+			sc_log(ctx, "sc_select_file: r=%d", r);
+			return r;
+		}
+		pin_id = sc_pkcs15init_get_pin_reference(p15card, profile,
+		    SC_AC_SYMBOLIC, SC_PKCS15INIT_USER_PIN);
+		if (pin_id >= 0) {
+			r = sc_pkcs15init_verify_secret(profile, p15card, NULL,
+			    SC_AC_CHV, pin_id);
+			if (r < 0) {
+				sc_log(ctx, "sc_pkcs15init_verify_secret: "
+				    "r=%d", r);
+				return r;
+			}
+		}
+		r = sc_card_ctl(p15card->card, SC_CARDCTL_CARDOS_DELETE_KEY,
+		    &keyinfo->key_reference);
+		if (r != SC_SUCCESS) {
+			sc_log(ctx, "sc_card_ctl SC_CARDCTL_CARDOS_DELETE_KEY:"
+			    " r=%d", r);
+			return r;
+		}
+	}
+
+	/* Delete object from the PKCS15 file system. */
+	if (path->len || path->aid.len) {
+		r = sc_select_file(p15card->card, path, &file);
+		if (r != SC_SUCCESS && r != SC_ERROR_FILE_NOT_FOUND) {
+			sc_log(ctx, "sc_select_file: r=%d", r);
+			return r;
+		}
+		if (r == SC_SUCCESS  && file->type != SC_FILE_TYPE_DF) {
+			r = sc_pkcs15init_delete_by_path(profile, p15card,
+			    path);
+			if (r != SC_SUCCESS) {
+				sc_file_free(file);
+				sc_log(ctx, "sc_pkcs15init_delete_by_path: "
+				    "r=%d", r);
+				return r;
+			}
+		}
+		sc_file_free(file);
+	}
+
+	return SC_SUCCESS;
+}
+
 static struct sc_pkcs15init_operations cardos5_ops, *cardos4_ops = NULL;
 
 struct sc_pkcs15init_operations *
@@ -1800,6 +1867,7 @@ sc_pkcs15init_get_cardos5_ops(void)
 	cardos5_ops.generate_key = cardos5_generate_key;
 	cardos5_ops.store_key = cardos5_store_key;
 	cardos5_ops.init_card = cardos5_init_card;
+	cardos5_ops.delete_object = cardos5_delete_object;
 
 	return &cardos5_ops;
 }

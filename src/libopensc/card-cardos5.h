@@ -20,7 +20,7 @@
 #ifndef _OPENSC_CARD_CARDOS5_H
 #define _OPENSC_CARD_CARDOS5_H
 
-#define BACKTRACK_PIN	0x80	/* look for PIN object in parent DFs as well */
+#define BACKTRACK_BIT	0x80	/* look for BS object in parent DFs as well */
 #define BACKTRACK_MASK	0x7F
 
 #define CARDOS5_ACCUMULATE_OBJECT_DATA_CLA		0x80
@@ -79,6 +79,10 @@
 
 #define CARDOS5_READ_RECORD_CLA	0x00
 #define CARDOS5_READ_RECORD_INS	0xB2
+
+#define CARDOS5_DELETE_KEY_CLA	0x90
+#define CARDOS5_DELETE_KEY_INS	0xE4
+#define CARDOS5_DELETE_KEY_SIGN	0x58
 
 #define DIR_ENTRY_TAG		0x6F
 #define FILE_ID_TAG		0x86
@@ -222,6 +226,7 @@ struct sc_cardos5_am_byte {
 #define AM_DF_LOAD_EXECUTABLE		0x90
 #define AM_DF_PUT_DATA_FCI		0x88
 
+#define AM_KEY_DELETE			0x81
 #define AM_KEY_OCI_UPD			0x82
 #define AM_KEY_RESET_RETRY_CTR		0x88
 #define AM_KEY_CHANGE			0xA0	/* CHANGE KEY/REF DATA */

@@ -152,7 +152,7 @@ add_acl_tag(uint8_t am_byte, unsigned int ac, unsigned int key_ref, buf_t *buf)
 	case SC_AC_CHV:
 	case SC_AC_TERM:
 	case SC_AC_AUT:
-		if ((key_ref & BACKTRACK_PIN) || key_ref > UINT8_MAX)
+		if ((key_ref & BACKTRACK_BIT) || key_ref > UINT8_MAX)
 			return -1;
 
 		buf_init(&crt, crt_buf, sizeof(crt_buf));
@@ -1560,6 +1560,45 @@ extract_key(sc_card_t *card, struct sc_cardctl_cardos5_genkey_info *args)
 	return SC_SUCCESS;
 }
 
+static int
+delete_key(sc_card_t *card, int *keyref)
+{
+	sc_apdu_t	apdu;
+	int		r;
+
+	if (keyref == NULL || *keyref < 0 || *keyref > UINT8_MAX) {
+		sc_log(card->ctx, "invalid keyref");
+		return SC_ERROR_INVALID_ARGUMENTS;
+	}
+
+	/*
+         * XXX We need to specify the backtracking bit in P2, otherwise the
+         * command fails with 68 AA = Object not found. But why? We install key
+         * objects directly on the 5015 DF, which the pkcs15init code has
+         * selected just prior to calling us. Backtracking shouldn't be needed
+         * in this case.
+         */
+
+	memset(&apdu, 0, sizeof(apdu));
+	apdu.cse = SC_APDU_CASE_1;
+	apdu.cla = CARDOS5_DELETE_KEY_CLA;
+	apdu.ins = CARDOS5_DELETE_KEY_INS;
+	apdu.p1 = CARDOS5_DELETE_KEY_SIGN;
+	apdu.p2 = *keyref | BACKTRACK_BIT; /*  XXX why? */
+
+	if ((r = sc_transmit_apdu(card, &apdu)) != SC_SUCCESS) {
+		sc_log(card->ctx, "tx/rx error");
+		return r;
+	}
+
+	if ((r = sc_check_sw(card, apdu.sw1, apdu.sw2)) != SC_SUCCESS) {
+		sc_log(card->ctx, "command failed");
+		return r;
+	}
+
+	return SC_SUCCESS;
+}
+
 /*
  * We inform the card that the expected maximum length of a APDU's data field
  * is 0x0300 (768). This is needed for 4096-bit RSA keys, which are large, and
@@ -1638,6 +1677,8 @@ cardos5_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 	case SC_CARDCTL_CARDOS_EXTRACT_KEY:
 		return extract_key(card,
 		    (struct sc_cardctl_cardos5_genkey_info *)ptr);
+	case SC_CARDCTL_CARDOS_DELETE_KEY:
+		return delete_key(card, (int *)ptr);
 	case SC_CARDCTL_CARDOS_PUT_DATA_ECD:
 		return put_data_ecd(card,
 		    (struct sc_cardctl_cardos_obj_info *)ptr);
@@ -1656,7 +1697,7 @@ cardos5_card_ctl(sc_card_t *card, unsigned long cmd, void *ptr)
 static int
 cardos5_pin_cmd(sc_card_t *card, struct sc_pin_cmd_data *data, int *tries_left)
 {
-	data->pin_reference |= BACKTRACK_PIN;
+	data->pin_reference |= BACKTRACK_BIT;
 
 	return iso_ops->pin_cmd(card, data, tries_left);
 }
