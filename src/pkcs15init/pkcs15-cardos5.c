@@ -1232,7 +1232,7 @@ generate_rsa_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 }
 
 static int
-load_curve(int nid, int asn1_flag, uint8_t **data, ssize_t *data_len)
+load_curve(int nid, int asn1_flag, uint8_t **data, size_t *data_len)
 {
 	BIO			*mem = NULL;
 	char			*mem_ptr;
@@ -1259,12 +1259,12 @@ load_curve(int nid, int asn1_flag, uint8_t **data, ssize_t *data_len)
 	if (mem_len < 0)
 		goto out;
 
-	*data = malloc(mem_len);
+	*data_len = (size_t)mem_len;
+	*data = malloc(*data_len);
 	if (*data == NULL)
 		goto out;
 
-	memcpy(*data, mem_ptr, mem_len);
-	*data_len = mem_len;
+	memcpy(*data, mem_ptr, *data_len);
 
 	r = 0;
 out:
@@ -1308,7 +1308,7 @@ struct curve_parameters {
 
 static int
 decode_curve_parameters(sc_card_t *card, uint8_t *curve_der,
-    ssize_t curve_der_len, struct curve_parameters *param)
+    size_t curve_der_len, struct curve_parameters *param)
 {
 	uint8_t		*tag = NULL;
 	uint16_t	 taglen;
@@ -1366,7 +1366,7 @@ out:
 }
 
 static int
-decode_curve_oid(sc_card_t *card, uint8_t *curve_oid, ssize_t curve_oid_len,
+decode_curve_oid(sc_card_t *card, uint8_t *curve_oid, size_t curve_oid_len,
     struct curve_parameters *param)
 {
 	buf_t	oid;
@@ -1464,8 +1464,8 @@ install_ecd(sc_card_t *card, sc_file_t *curvedb, const char *named_curve,
 
 	uint8_t			*curve_der = NULL;
 	uint8_t			*curve_oid = NULL;
-	ssize_t			 curve_der_len;
-	ssize_t			 curve_oid_len;
+	size_t			 curve_der_len;
+	size_t			 curve_oid_len;
 	struct curve_parameters	 param;
 	int			 curve_nid;
 	int			 r = SC_ERROR_OBJECT_NOT_VALID;
