@@ -1178,6 +1178,7 @@ generate_rsa_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	return SC_SUCCESS;
 }
 
+#ifdef ENABLE_OPENSSL
 static int
 load_curve(int nid, int asn1_flag, uint8_t **data, size_t *data_len)
 {
@@ -1222,6 +1223,7 @@ out:
 
 	return r;
 }
+#endif /* ENABLE_OPENSSL */
 
 struct obj {
 	uint8_t		*data;

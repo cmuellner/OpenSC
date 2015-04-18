@@ -288,6 +288,7 @@ switch_keys(const char *apdu_path)
 	free(data);
 }
 
+#ifdef ENABLE_OPENSSL
 /*
  * Calculate the Message Authentication Code (MAC) of "data" according to AES
  * CMAC 128 ECB using "key" as the cryptographic key. The result is stored in
@@ -530,6 +531,13 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 }
+#else /* !ENABLE_OPENSSL */
+void
+smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
+{
+	errx(1, "%s: not available without openssl", __func__);
+}
+#endif /* ENABLE_OPENSSL */
 
 void
 full_erase(const char *startkey_path)
