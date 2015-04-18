@@ -33,27 +33,27 @@
 
 static struct sc_cardos5_am_byte ef_acl[] = {
 	{ AM_EF_DELETE,			SC_AC_OP_DELETE },
-	{ AM_EF_TERMINATE,		-1U },
+	{ AM_EF_TERMINATE,		UINT_MAX },
 	{ AM_EF_ACTIVATE,		SC_AC_OP_REHABILITATE },
 	{ AM_EF_DEACTIVATE,		SC_AC_OP_INVALIDATE },
 	{ AM_EF_WRITE,			SC_AC_OP_WRITE },
 	{ AM_EF_UPDATE,			SC_AC_OP_UPDATE },
 	{ AM_EF_READ,			SC_AC_OP_READ },
-	{ AM_EF_INCREASE,		-1U },
-	{ AM_EF_DECREASE,		-1U },
+	{ AM_EF_INCREASE,		UINT_MAX },
+	{ AM_EF_DECREASE,		UINT_MAX },
 };
 
 static struct sc_cardos5_am_byte df_acl[] = {
 	{ AM_DF_DELETE_SELF,		SC_AC_OP_DELETE },
-	{ AM_DF_TERMINATE,		-1U },
+	{ AM_DF_TERMINATE,		UINT_MAX },
 	{ AM_DF_ACTIVATE,		SC_AC_OP_REHABILITATE },
 	{ AM_DF_DEACTIVATE,		SC_AC_OP_INVALIDATE },
 	{ AM_DF_CREATE_DF_FILE,		SC_AC_OP_CREATE },
 	{ AM_DF_CREATE_EF_FILE,		SC_AC_OP_CREATE },
-	{ AM_DF_DELETE_CHILD,		-1U },
+	{ AM_DF_DELETE_CHILD,		UINT_MAX },
 	{ AM_DF_PUT_DATA_OCI,		SC_AC_OP_CREATE },
 	{ AM_DF_PUT_DATA_OCI_UPDATE,	SC_AC_OP_UPDATE },
-	{ AM_DF_LOAD_EXECUTABLE,	-1U },
+	{ AM_DF_LOAD_EXECUTABLE,	UINT_MAX },
 	{ AM_DF_PUT_DATA_FCI,		SC_AC_OP_CREATE },
 };
 
@@ -233,7 +233,7 @@ cardos5_init(sc_card_t *card)
 		return SC_ERROR_OUT_OF_MEMORY;
 	}
 
-	priv->cse_algorithm = -1U;
+	priv->cse_algorithm = UINT_MAX;
 	card->drv_data = priv;
 
 	flags = SC_ALGORITHM_RSA_RAW | SC_ALGORITHM_RSA_HASH_NONE |
@@ -461,7 +461,7 @@ parse_df_arl(sc_card_t *card, sc_file_t *file, const uint8_t *arl, size_t len)
 
 	if (file->id == 0x3f00) {
 		for (i = 0; i < df_acl_n; i++) {
-			if (df_acl[i].op_byte != -1U) {
+			if (df_acl[i].op_byte != UINT_MAX) {
 				r = sc_file_add_acl_entry(file,
 				    df_acl[i].op_byte, SC_AC_NONE,
 				    SC_AC_KEY_REF_NONE);
@@ -536,7 +536,7 @@ parse_df_arl(sc_card_t *card, sc_file_t *file, const uint8_t *arl, size_t len)
 			return SC_ERROR_NO_CARD_SUPPORT;
 		}
 
-		if (df_acl[i].op_byte != -1U) {
+		if (df_acl[i].op_byte != UINT_MAX) {
 			r = sc_file_add_acl_entry(file, df_acl[i].op_byte, ac,
 			    ref);
 			if (r != SC_SUCCESS)
@@ -606,7 +606,7 @@ parse_ef_arl(sc_card_t *card, sc_file_t *file, const uint8_t *arl, size_t len)
 			return SC_ERROR_NO_CARD_SUPPORT;
 		}
 
-		if (ef_acl[i].op_byte != -1U) {
+		if (ef_acl[i].op_byte != UINT_MAX) {
 			r = sc_file_add_acl_entry(file, ef_acl[i].op_byte, ac,
 			    ref);
 			if (r != SC_SUCCESS)
@@ -798,9 +798,9 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 	/* Populate ARL. */
 	for (i = 0; i < df_acl_n; i++) {
 		unsigned int		 ac = SC_AC_NEVER;
-		unsigned int		 keyref = -1U;
+		unsigned int		 keyref = UINT_MAX;
 
-		if (df_acl[i].op_byte != -1U) {
+		if (df_acl[i].op_byte != UINT_MAX) {
 			e = sc_file_get_acl_entry(df, df_acl[i].op_byte);
 			if (e != NULL) {
 				ac = e->method;
@@ -898,9 +898,9 @@ construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
 	for (i = 0; i < ef_acl_n; i++) {
 		const sc_acl_entry_t	*e = NULL;
 		unsigned int		 ac = SC_AC_NEVER;
-		unsigned int		 keyref = -1U;
+		unsigned int		 keyref = UINT_MAX;
 
-		if (ef_acl[i].op_byte != -1U) {
+		if (ef_acl[i].op_byte != UINT_MAX) {
 			e = sc_file_get_acl_entry(ef, ef_acl[i].op_byte);
 			if (e != NULL) {
 				ac = e->method;
@@ -1026,7 +1026,7 @@ cardos5_set_security_env(sc_card_t *card, const sc_security_env_t *env,
 		sc_log(card->ctx, "inconsistent driver state");
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
-	priv->cse_algorithm = -1U;
+	priv->cse_algorithm = UINT_MAX;
 
 	memset(&apdu, 0, sizeof(apdu));
 	apdu.cse = SC_APDU_CASE_3_SHORT;
@@ -1283,7 +1283,7 @@ cardos5_compute_signature(sc_card_t *card, const unsigned char *data,
 	int				 r;
 
 	priv = card->drv_data;
-	if (priv == NULL || priv->cse_algorithm == -1U) {
+	if (priv == NULL || priv->cse_algorithm == UINT_MAX) {
 		sc_log(card->ctx, "inconsistent driver state");
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}

@@ -96,7 +96,7 @@ asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
 
 	if (tag_len > UINT16_MAX)
 		return -1;
-	*tag_length = tag_len;
+	*tag_length = (uint16_t)tag_len;
 	if (buf->size - buf->bytes_used < *tag_length)
 		return -1;
 
