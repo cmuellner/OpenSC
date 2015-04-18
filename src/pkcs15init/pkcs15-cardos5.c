@@ -1223,21 +1223,6 @@ out:
 	return r;
 }
 
-/*
- * Poor man's DER parser. The format used to encode curve parameters seems
- * simple enough to warrant a quick reimplementation. It certainly appears to
- * be easier (and better) than to rely on OpenSSL's parser, anyway.
- *
- * The syntax expected here was obtained from:
- * http://www.ecc-brainpool.org/download/Domain-parameters.pdf, page 34.
- */
-
-#define INTEGER_TAG		0x02
-#define BIT_STRING_TAG		0x03
-#define OCTET_STRING_TAG	0x04
-#define OID_TAG			0x06
-#define SEQUENCE_TAG		0x30
-
 struct obj {
 	uint8_t		*data;
 	uint16_t	 len;
@@ -1264,41 +1249,43 @@ decode_curve_parameters(sc_card_t *card, uint8_t *curve_der,
 
 	buf_init(&der, curve_der, curve_der_len);
 
+#define SEQUENCE_TAG (SC_ASN1_TAG_SEQUENCE | SC_ASN1_TAG_CONSTRUCTED)
+
 	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der))
 		goto out;
 
 	/* XXX What is the meaning of this INTEGER tag set to 1? */
-	if (asn1_get_tag(card->ctx, INTEGER_TAG, &tag, &taglen, &der) ||
+	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER, &tag, &taglen, &der) ||
 	    taglen != 1 || tag[0] != 0x01)
 		goto out;
 
 	/* OID and P are grouped in a sequence. */
 	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    asn1_get_tag(card->ctx, OID_TAG, &param->oid.data, &param->oid.len,
-	    &der) || asn1_get_tag(card->ctx, INTEGER_TAG, &param->p.data,
-	    &param->p.len, &der))
+	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
+	    &param->oid.len, &der) || asn1_get_tag(card->ctx,
+	    SC_ASN1_TAG_INTEGER, &param->p.data, &param->p.len, &der))
 		goto out;
 
 	/* A and B are grouped in a sequence. */
 	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    asn1_get_tag(card->ctx, OCTET_STRING_TAG, &param->a.data,
-	    &param->a.len, &der) || asn1_get_tag(card->ctx, OCTET_STRING_TAG,
-	    &param->b.data, &param->b.len, &der))
+	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->a.data,
+	    &param->a.len, &der) || asn1_get_tag(card->ctx,
+	    SC_ASN1_TAG_OCTET_STRING, &param->b.data, &param->b.len, &der))
 		goto out;
 
 	free(tag);
 	tag = NULL;
 
 	/* Some curves have an optional seed value: skip it. */
-	if (der.ptr[0] == BIT_STRING_TAG && asn1_get_tag(card->ctx,
-	    BIT_STRING_TAG, &tag, &taglen, &der))
+	if (der.ptr[0] == SC_ASN1_TAG_BIT_STRING && asn1_get_tag(card->ctx,
+	    SC_ASN1_TAG_BIT_STRING, &tag, &taglen, &der))
 		goto out;
 
 	/* G, R and F are ungrouped, but appear sequentially. */
-	if (asn1_get_tag(card->ctx, OCTET_STRING_TAG, &param->g.data,
-	    &param->g.len, &der) || asn1_get_tag(card->ctx, INTEGER_TAG,
+	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->g.data,
+	    &param->g.len, &der) || asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER,
 	    &param->r.data, &param->r.len, &der) || asn1_get_tag(card->ctx,
-	    INTEGER_TAG, &param->f.data, &param->f.len, &der))
+	    SC_ASN1_TAG_INTEGER, &param->f.data, &param->f.len, &der))
 		goto out;
 
 	/* Make sure that we consumed the whole buffer. */
@@ -1325,8 +1312,8 @@ decode_curve_oid(sc_card_t *card, uint8_t *curve_oid, size_t curve_oid_len,
 
 	buf_init(&oid, curve_oid, curve_oid_len);
 
-	if (asn1_get_tag(card->ctx, OID_TAG, &param->oid.data, &param->oid.len,
-	    &oid))
+	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
+	    &param->oid.len, &oid))
 		return SC_ERROR_OBJECT_NOT_VALID;
 
 	return SC_SUCCESS;
