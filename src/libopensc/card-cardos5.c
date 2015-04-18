@@ -107,15 +107,56 @@ buf_init(buf_t *buf, uint8_t *ptr, size_t size)
 }
 
 static int
+asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
+    uint16_t *tag_length, buf_t *buf)
+{
+	const uint8_t	*tag_ptr;
+	size_t		 tag_len; /* size_t version of tag_length */
+	size_t		 delta;
+
+	tag_ptr = sc_asn1_find_tag(ctx, buf->ptr, buf->size - buf->bytes_used,
+	    tag, &tag_len);
+	if (tag_ptr == NULL || tag_ptr < buf->ptr)
+		return -1;
+
+	delta = tag_ptr - buf->ptr;
+	if (buf->size - buf->bytes_used < delta)
+		return -1;
+	buf->ptr += delta;
+	buf->bytes_used += delta;
+
+	if (tag_len > UINT16_MAX)
+		return -1;
+	*tag_length = tag_len;
+	if (buf->size - buf->bytes_used < *tag_length)
+		return -1;
+
+	if (tag_content != NULL) {
+		if ((*tag_content = malloc(*tag_length)) == NULL)
+			return -1;
+		memcpy(*tag_content, buf->ptr, *tag_length);
+		buf->ptr += *tag_length;
+		buf->bytes_used += *tag_length;
+	}
+
+	return 0;
+}
+
+static int
 asn1_put_tag(uint8_t tag, const void *tag_content, size_t tag_content_len,
     buf_t *buf)
 {
-	int r;
+	int		 r;
+	const uint8_t	*orig_ptr = buf->ptr;
+	size_t		 delta;
 
 	r = sc_asn1_put_tag(tag, (const uint8_t *)tag_content, tag_content_len,
 	    buf->ptr, buf->size - buf->bytes_used, &buf->ptr);
 	if (r == SC_SUCCESS) {
-		buf->bytes_used += tag_content_len + 2;
+		delta = buf->ptr - orig_ptr;
+		if (buf->ptr < orig_ptr || buf->size - buf->bytes_used < delta)
+			return -1;
+		buf->bytes_used += delta;
 		return 0;
 	}
 
@@ -169,102 +210,6 @@ add_acl_tag(uint8_t am_byte, unsigned int ac, unsigned int key_ref, buf_t *buf)
 	default:
 		return -1;
 	}
-}
-
-static int
-bertlv_put_tag(uint8_t tag, const uint8_t *data, size_t length, buf_t *buf)
-{
-	if (length > UINT16_MAX || buf->bytes_used == buf->size)
-		return -1;
-
-	*(buf->ptr)++ = tag;
-	buf->bytes_used++;
-
-	if (length < 0x80) {
-		if (buf->bytes_used == buf->size)
-			return -1;
-		*(buf->ptr)++ = (uint8_t)length;
-		buf->bytes_used++;
-	} else if (length < 0xFF) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		*(buf->ptr)++ = 0x81;
-		*(buf->ptr)++ = (uint8_t)length;
-		buf->bytes_used += 2;
-	} else {
-		if (buf->size - buf->bytes_used < 3)
-			return -1;
-		*(buf->ptr)++ = 0x82;
-		*(buf->ptr)++ = (uint8_t)(length >> 8);
-		*(buf->ptr)++ = (uint8_t)(length & 0xFF);
-		buf->bytes_used += 3;
-	}
-
-	if (buf->bytes_used - buf->size < length)
-		return -1;
-
-	memcpy(buf->ptr, data, length);
-	buf->ptr += length;
-	buf->bytes_used += length;
-
-	return 0;
-}
-
-static int
-bertlv_get_tag(uint16_t tag, uint8_t **tag_content, uint16_t *tag_length,
-    buf_t *buf)
-{
-	uint8_t	c;
-
-	if (tag > 0xFF) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		if (*(buf->ptr)++ != (uint8_t)(tag >> 8) ||
-		    *(buf->ptr)++ != (uint8_t)(tag))
-			return -1;
-		buf->bytes_used += 2;
-	} else {
-		if (buf->size - buf->bytes_used < 1)
-			return -1;
-		if (*(buf->ptr)++ != (uint8_t)(tag))
-			return -1;
-		buf->bytes_used += 1;
-	}
-
-	if (buf->size - buf->bytes_used < 1)
-		return -1;
-
-	c = *(buf->ptr)++;
-	buf->bytes_used += 1;
-
-	if (c < 0x80)
-		*tag_length = c;
-	else if (c == 0x81) {
-		if (buf->size - buf->bytes_used < 1)
-			return -1;
-		buf->bytes_used += 1;
-		*tag_length = *(buf->ptr)++;
-	} else if (c == 0x82) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		buf->bytes_used += 2;
-		*tag_length = (uint16_t)(*(buf->ptr)++ << 8);
-		*tag_length |= *(buf->ptr)++;
-	} else
-		return -1;
-
-	if (buf->size - buf->bytes_used < *tag_length)
-		return -1;
-
-	if (tag_content != NULL) {
-		if ((*tag_content = malloc(*tag_length)) == NULL)
-			return -1;
-		memcpy(*tag_content, buf->ptr, *tag_length);
-		buf->ptr += *tag_length;
-		buf->bytes_used += *tag_length;
-	}
-
-	return 0;
 }
 
 static int
@@ -383,7 +328,7 @@ parse_entry(struct sc_context *ctx, buf_t *entries, uint8_t *entry_buf,
 
 	while (entry.size - entry.bytes_used >= 2) {
 		tag = entry.ptr[0];
-		if (bertlv_get_tag(tag, &tag_ptr, &tag_len, &entry)) {
+		if (asn1_get_tag(ctx, tag, &tag_ptr, &tag_len, &entry)) {
 			sc_log(ctx, "asn1 error");
 			return SC_ERROR_UNKNOWN_DATA_RECEIVED;
 		}
@@ -461,7 +406,7 @@ list_page(sc_card_t *card, buf_t *entries, uint8_t offset, uint8_t *next_offset)
 
 	buf_init(&page, page_buf, apdu.resplen);
 
-	while (bertlv_get_tag(DIR_ENTRY_TAG, &entry, &entry_len, &page) == 0) {
+	while (!asn1_get_tag(ctx, DIR_ENTRY_TAG, &entry, &entry_len, &page)) {
 		r = parse_entry(ctx, entries, entry, entry_len, next_offset);
 		free(entry);
 		if (r != SC_SUCCESS)
@@ -1190,7 +1135,7 @@ get_point(const coordinate_t *X, const coordinate_t *Y, buf_t *encoded_sig)
 	memcpy(point, X->encoded_ptr, X->encoded_len);
 	memcpy(point + X->encoded_len, Y->encoded_ptr, Y->encoded_len);
 
-	if (bertlv_put_tag(0x30, point, point_len, encoded_sig)) {
+	if (asn1_put_tag(0x30, point, point_len, encoded_sig)) {
 		free(point);
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}

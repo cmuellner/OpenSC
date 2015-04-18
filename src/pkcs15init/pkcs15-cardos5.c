@@ -76,15 +76,56 @@ buf_init(buf_t *buf, uint8_t *ptr, size_t size)
 }
 
 static int
+asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
+    uint16_t *tag_length, buf_t *buf)
+{
+	const uint8_t	*tag_ptr;
+	size_t		 tag_len; /* size_t version of tag_length */
+	size_t		 delta;
+
+	tag_ptr = sc_asn1_find_tag(ctx, buf->ptr, buf->size - buf->bytes_used,
+	    tag, &tag_len);
+	if (tag_ptr == NULL || tag_ptr < buf->ptr)
+		return -1;
+
+	delta = tag_ptr - buf->ptr;
+	if (buf->size - buf->bytes_used < delta)
+		return -1;
+	buf->ptr += delta;
+	buf->bytes_used += delta;
+
+	if (tag_len > UINT16_MAX)
+		return -1;
+	*tag_length = tag_len;
+	if (buf->size - buf->bytes_used < *tag_length)
+		return -1;
+
+	if (tag_content != NULL) {
+		if ((*tag_content = malloc(*tag_length)) == NULL)
+			return -1;
+		memcpy(*tag_content, buf->ptr, *tag_length);
+		buf->ptr += *tag_length;
+		buf->bytes_used += *tag_length;
+	}
+
+	return 0;
+}
+
+static int
 asn1_put_tag(uint8_t tag, const void *tag_content, size_t tag_content_len,
     buf_t *buf)
 {
-	int r;
+	int		 r;
+	const uint8_t	*orig_ptr = buf->ptr;
+	size_t		 delta;
 
 	r = sc_asn1_put_tag(tag, (const uint8_t *)tag_content, tag_content_len,
 	    buf->ptr, buf->size - buf->bytes_used, &buf->ptr);
 	if (r == SC_SUCCESS) {
-		buf->bytes_used += tag_content_len + 2;
+		delta = buf->ptr - orig_ptr;
+		if (buf->ptr < orig_ptr || buf->size - buf->bytes_used < delta)
+			return -1;
+		buf->bytes_used += delta;
 		return 0;
 	}
 
@@ -501,102 +542,6 @@ add_key_crt(int key_id, int algo, int active, int pubkey, buf_t *b)
 }
 
 static int
-bertlv_put_tag(uint8_t tag, const uint8_t *data, size_t length, buf_t *buf)
-{
-	if (length > UINT16_MAX || buf->bytes_used == buf->size)
-		return -1;
-
-	*(buf->ptr)++ = tag;
-	buf->bytes_used++;
-
-	if (length < 0x80) {
-		if (buf->bytes_used == buf->size)
-			return -1;
-		*(buf->ptr)++ = (uint8_t)length;
-		buf->bytes_used++;
-	} else if (length < 0xFF) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		*(buf->ptr)++ = 0x81;
-		*(buf->ptr)++ = (uint8_t)length;
-		buf->bytes_used += 2;
-	} else {
-		if (buf->size - buf->bytes_used < 3)
-			return -1;
-		*(buf->ptr)++ = 0x82;
-		*(buf->ptr)++ = (uint8_t)(length >> 8);
-		*(buf->ptr)++ = (uint8_t)(length & 0xFF);
-		buf->bytes_used += 3;
-	}
-
-	if (buf->bytes_used - buf->size < length)
-		return -1;
-
-	memcpy(buf->ptr, data, length);
-	buf->ptr += length;
-	buf->bytes_used += length;
-
-	return 0;
-}
-
-static int
-bertlv_get_tag(uint16_t tag, uint8_t **tag_content, uint16_t *tag_length,
-    buf_t *buf)
-{
-	uint8_t	c;
-
-	if (tag > 0xFF) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		if (*(buf->ptr)++ != (uint8_t)(tag >> 8) ||
-		    *(buf->ptr)++ != (uint8_t)(tag))
-			return -1;
-		buf->bytes_used += 2;
-	} else {
-		if (buf->size - buf->bytes_used < 1)
-			return -1;
-		if (*(buf->ptr)++ != (uint8_t)(tag))
-			return -1;
-		buf->bytes_used += 1;
-	}
-
-	if (buf->size - buf->bytes_used < 1)
-		return -1;
-
-	c = *(buf->ptr)++;
-	buf->bytes_used += 1;
-
-	if (c < 0x80)
-		*tag_length = c;
-	else if (c == 0x81) {
-		if (buf->size - buf->bytes_used < 1)
-			return -1;
-		buf->bytes_used += 1;
-		*tag_length = *(buf->ptr)++;
-	} else if (c == 0x82) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		buf->bytes_used += 2;
-		*tag_length = (uint16_t)(*(buf->ptr)++ << 8);
-		*tag_length |= *(buf->ptr)++;
-	} else
-		return -1;
-
-	if (buf->size - buf->bytes_used < *tag_length)
-		return -1;
-
-	if (tag_content != NULL) {
-		if ((*tag_content = malloc(*tag_length)) == NULL)
-			return -1;
-		memcpy(*tag_content, buf->ptr, *tag_length);
-		buf->ptr += *tag_length;
-		buf->bytes_used += *tag_length;
-	}
-
-	return 0;
-}
-
-static int
 store_privkey(sc_card_t *card, int key_id, int algo, int active, int pin_id,
     const uint8_t *hash)
 {
@@ -676,40 +621,40 @@ cardos_put_rsa_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 
 	/* >= 2048-bit keys follow the Chinese Remainder Theorem format. */
 	if (rsa->bytes > 256) {
-		if (bertlv_put_tag(RSA_PRIVKEY_PRIME_P_TAG, rsa->privkey.p.data,
+		if (asn1_put_tag(RSA_PRIVKEY_PRIME_P_TAG, rsa->privkey.p.data,
 		    rsa->privkey.p.len, &payload))
 			goto asn1_error;
 
-		if (bertlv_put_tag(RSA_PRIVKEY_PRIME_Q_TAG, rsa->privkey.q.data,
+		if (asn1_put_tag(RSA_PRIVKEY_PRIME_Q_TAG, rsa->privkey.q.data,
 		    rsa->privkey.q.len, &payload))
 			goto asn1_error;
 
-		if (bertlv_put_tag(RSA_PRIVKEY_QINV_TAG, rsa->privkey.iqmp.data,
+		if (asn1_put_tag(RSA_PRIVKEY_QINV_TAG, rsa->privkey.iqmp.data,
 		    rsa->privkey.iqmp.len, &payload))
 			goto asn1_error;
 
-		if (bertlv_put_tag(RSA_PRIVKEY_REMAINDER1_TAG,
+		if (asn1_put_tag(RSA_PRIVKEY_REMAINDER1_TAG,
 		    rsa->privkey.dmp1.data, rsa->privkey.dmp1.len, &payload))
 			goto asn1_error;
 
-		if (bertlv_put_tag(RSA_PRIVKEY_REMAINDER2_TAG,
+		if (asn1_put_tag(RSA_PRIVKEY_REMAINDER2_TAG,
 		    rsa->privkey.dmq1.data, rsa->privkey.dmq1.len, &payload))
 			goto asn1_error;
 	} else {
-		if (bertlv_put_tag(RSA_PRIVKEY_MODULUS_TAG,
+		if (asn1_put_tag(RSA_PRIVKEY_MODULUS_TAG,
 		    rsa->privkey.modulus.data, rsa->privkey.modulus.len,
 		    &payload))
 			goto asn1_error;
 
-		if (bertlv_put_tag(RSA_PRIVKEY_EXPONENT_TAG,
+		if (asn1_put_tag(RSA_PRIVKEY_EXPONENT_TAG,
 		    rsa->privkey.d.data, rsa->privkey.d.len, &payload))
 			goto asn1_error;
 	}
 
 	buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
-	    payload.bytes_used, &object))
+	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
+	    &object))
 		goto asn1_error;
 
 	r = push_obj(card, object_buf, object.bytes_used, hash);
@@ -790,7 +735,7 @@ put_ec_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 	if (r != SC_SUCCESS)
 		return r;
 
-	if (bertlv_put_tag(ECC_PRIVKEY_D, ec->privkey.privateD.data,
+	if (asn1_put_tag(ECC_PRIVKEY_D, ec->privkey.privateD.data,
 	    ec->privkey.privateD.len, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
@@ -798,8 +743,8 @@ put_ec_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 
 	buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
-	    payload.bytes_used, &object)) {
+	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
+	    &object)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -859,18 +804,18 @@ cardos_put_rsa_pubkey(struct sc_pkcs15_card *p15card,
 
 	buf_init(&payload, payload_buf, sizeof(payload_buf));
 
-	if (bertlv_put_tag(RSA_PUBKEY_MODULUS, rsa->pubkey.modulus.data,
+	if (asn1_put_tag(RSA_PUBKEY_MODULUS, rsa->pubkey.modulus.data,
 	    rsa->pubkey.modulus.len, &payload))
 		goto asn1_error;
 
-	if (bertlv_put_tag(RSA_PUBKEY_EXPONENT, rsa->pubkey.exponent.data,
+	if (asn1_put_tag(RSA_PUBKEY_EXPONENT, rsa->pubkey.exponent.data,
 	    rsa->pubkey.exponent.len, &payload))
 		goto asn1_error;
 
 	buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
-	    payload.bytes_used, &object))
+	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
+	    &object))
 		goto asn1_error;
 
 	r = push_obj(card, object_buf, object.bytes_used, hash);
@@ -913,7 +858,7 @@ put_ec_pubkey(struct sc_pkcs15_card *p15card, sc_pkcs15_prkey_info_t *keyinfo,
 	if (r != SC_SUCCESS)
 		return r;
 
-	if (bertlv_put_tag(ECC_PUBKEY_Y, ec->pubkey.ecpointQ.value,
+	if (asn1_put_tag(ECC_PUBKEY_Y, ec->pubkey.ecpointQ.value,
 	    ec->pubkey.ecpointQ.len, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
@@ -921,8 +866,8 @@ put_ec_pubkey(struct sc_pkcs15_card *p15card, sc_pkcs15_prkey_info_t *keyinfo,
 
 	buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
-	    payload.bytes_used, &object)) {
+	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
+	    &object)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -981,17 +926,19 @@ extract_rsa_pubkey(sc_card_t *card, struct sc_pkcs15_prkey_info *keyinfo,
 
 	buf_init(&keybuf, args.data, args.len);
 
-	if (bertlv_get_tag(0x7F49, NULL, &taglen, &keybuf))
+	if (asn1_get_tag(card->ctx, 0x7F49, NULL, &taglen, &keybuf))
 		goto parse_error;
 
-	if (bertlv_get_tag(RSA_PUBKEY_MODULUS, &pubkey->u.rsa.modulus.data,
+	if (asn1_get_tag(card->ctx, RSA_PUBKEY_MODULUS,
+	    &pubkey->u.rsa.modulus.data,
 	    (uint16_t *)&pubkey->u.rsa.modulus.len, &keybuf))
 		goto parse_error;
 
 	if (pubkey->u.rsa.modulus.len != modulus_bytes)
 		goto parse_error;
 
-	if (bertlv_get_tag(RSA_PUBKEY_EXPONENT, &pubkey->u.rsa.exponent.data,
+	if (asn1_get_tag(card->ctx, RSA_PUBKEY_EXPONENT,
+	    &pubkey->u.rsa.exponent.data,
 	    (uint16_t *)&pubkey->u.rsa.exponent.len, &keybuf))
 		goto parse_error;
 
@@ -1076,8 +1023,8 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 			uint8_t	*oid, *encoded_oid_buf;
 			buf_t	 encoded_oid;
 
-			if (bertlv_get_tag(ECC_PUBKEY_OID, &oid, &taglen,
-			    &keybuf)) {
+			if (asn1_get_tag(card->ctx, ECC_PUBKEY_OID, &oid,
+			    &taglen, &keybuf)) {
 				sc_log(card->ctx, "couldn't get oid");
 				goto parse_error;
 			}
@@ -1090,7 +1037,7 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 
 			buf_init(&encoded_oid, encoded_oid_buf, taglen + 2);
 
-			if (bertlv_put_tag(ECC_PUBKEY_OID, oid, taglen,
+			if (asn1_put_tag(ECC_PUBKEY_OID, oid, taglen,
 			    &encoded_oid)) {
 				sc_log(card->ctx, "couldn't encode oid");
 				free(encoded_oid_buf);
@@ -1112,8 +1059,8 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 			    ecp->der_len);
 			pubkey->u.ec.params.der.len = ecp->der_len;
 		} else {
-			if (bertlv_get_tag(pubkey_parts[i], NULL, &taglen,
-			    &keybuf)) {
+			if (asn1_get_tag(card->ctx, pubkey_parts[i], NULL,
+			    &taglen, &keybuf)) {
 				sc_log(card->ctx, "couldn't parse ec pubkey "
 				    "(0x%x)", pubkey_parts[i]);
 				goto parse_error;
@@ -1126,7 +1073,7 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 		}
 	}
 
-	if (bertlv_get_tag(ECC_PUBKEY_Y, &pubkey->u.ec.ecpointQ.value,
+	if (asn1_get_tag(card->ctx, ECC_PUBKEY_Y, &pubkey->u.ec.ecpointQ.value,
 	    (uint16_t *)&pubkey->u.ec.ecpointQ.len, &keybuf)) {
 		sc_log(card->ctx, "couldn't parse ec pubkey");
 		goto parse_error;
@@ -1317,40 +1264,41 @@ decode_curve_parameters(sc_card_t *card, uint8_t *curve_der,
 
 	buf_init(&der, curve_der, curve_der_len);
 
-	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der))
+	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der))
 		goto out;
 
 	/* XXX What is the meaning of this INTEGER tag set to 1? */
-	if (bertlv_get_tag(INTEGER_TAG, &tag, &taglen, &der) ||
+	if (asn1_get_tag(card->ctx, INTEGER_TAG, &tag, &taglen, &der) ||
 	    taglen != 1 || tag[0] != 0x01)
 		goto out;
 
 	/* OID and P are grouped in a sequence. */
-	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    bertlv_get_tag(OID_TAG, &param->oid.data, &param->oid.len, &der) ||
-	    bertlv_get_tag(INTEGER_TAG, &param->p.data, &param->p.len, &der))
+	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    asn1_get_tag(card->ctx, OID_TAG, &param->oid.data, &param->oid.len,
+	    &der) || asn1_get_tag(card->ctx, INTEGER_TAG, &param->p.data,
+	    &param->p.len, &der))
 		goto out;
 
 	/* A and B are grouped in a sequence. */
-	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    bertlv_get_tag(OCTET_STRING_TAG, &param->a.data, &param->a.len,
-	    &der) || bertlv_get_tag(OCTET_STRING_TAG, &param->b.data,
-	    &param->b.len, &der))
+	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    asn1_get_tag(card->ctx, OCTET_STRING_TAG, &param->a.data,
+	    &param->a.len, &der) || asn1_get_tag(card->ctx, OCTET_STRING_TAG,
+	    &param->b.data, &param->b.len, &der))
 		goto out;
 
 	free(tag);
 	tag = NULL;
 
 	/* Some curves have an optional seed value: skip it. */
-	if (der.ptr[0] == BIT_STRING_TAG && bertlv_get_tag(BIT_STRING_TAG, &tag,
-	    &taglen, &der))
+	if (der.ptr[0] == BIT_STRING_TAG && asn1_get_tag(card->ctx,
+	    BIT_STRING_TAG, &tag, &taglen, &der))
 		goto out;
 
 	/* G, R and F are ungrouped, but appear sequentially. */
-	if (bertlv_get_tag(OCTET_STRING_TAG, &param->g.data, &param->g.len,
-	    &der) || bertlv_get_tag(INTEGER_TAG, &param->r.data, &param->r.len,
-	    &der) || bertlv_get_tag(INTEGER_TAG, &param->f.data, &param->f.len,
-	    &der))
+	if (asn1_get_tag(card->ctx, OCTET_STRING_TAG, &param->g.data,
+	    &param->g.len, &der) || asn1_get_tag(card->ctx, INTEGER_TAG,
+	    &param->r.data, &param->r.len, &der) || asn1_get_tag(card->ctx,
+	    INTEGER_TAG, &param->f.data, &param->f.len, &der))
 		goto out;
 
 	/* Make sure that we consumed the whole buffer. */
@@ -1377,7 +1325,8 @@ decode_curve_oid(sc_card_t *card, uint8_t *curve_oid, size_t curve_oid_len,
 
 	buf_init(&oid, curve_oid, curve_oid_len);
 
-	if (bertlv_get_tag(OID_TAG, &param->oid.data, &param->oid.len, &oid))
+	if (asn1_get_tag(card->ctx, OID_TAG, &param->oid.data, &param->oid.len,
+	    &oid))
 		return SC_ERROR_OBJECT_NOT_VALID;
 
 	return SC_SUCCESS;
@@ -1404,13 +1353,13 @@ push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
 
 	buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
 
-        if (bertlv_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
-	    bertlv_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
-	    bertlv_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
-	    bertlv_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
-	    bertlv_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
-	    bertlv_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
-	    bertlv_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
+        if (asn1_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
+	    asn1_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
+	    asn1_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
+	    asn1_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
+	    asn1_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
+	    asn1_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
+	    asn1_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	/*
@@ -1420,7 +1369,7 @@ push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
 
 	buf_init(&obj, obj_buf, sizeof(obj_buf));
 
-        if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
+        if (asn1_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	r = push_obj(card, obj_buf, obj.bytes_used, sha256);

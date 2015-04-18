@@ -78,15 +78,56 @@ buf_init(buf_t *buf, uint8_t *ptr, size_t size)
 }
 
 static int
-asn1_put_tag(unsigned char tag, const unsigned char *tag_content,
-    size_t tag_content_len, buf_t *buf)
+asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
+    uint16_t *tag_length, buf_t *buf)
 {
-	int r;
+	const uint8_t	*tag_ptr;
+	size_t		 tag_len; /* size_t version of tag_length */
+	size_t		 delta;
 
-	r = sc_asn1_put_tag(tag, tag_content, tag_content_len, buf->ptr,
-	    buf->size - buf->bytes_used, &buf->ptr);
+	tag_ptr = sc_asn1_find_tag(ctx, buf->ptr, buf->size - buf->bytes_used,
+	    tag, &tag_len);
+	if (tag_ptr == NULL || tag_ptr < buf->ptr)
+		return -1;
+
+	delta = tag_ptr - buf->ptr;
+	if (buf->size - buf->bytes_used < delta)
+		return -1;
+	buf->ptr += delta;
+	buf->bytes_used += delta;
+
+	if (tag_len > UINT16_MAX)
+		return -1;
+	*tag_length = tag_len;
+	if (buf->size - buf->bytes_used < *tag_length)
+		return -1;
+
+	if (tag_content != NULL) {
+		if ((*tag_content = malloc(*tag_length)) == NULL)
+			return -1;
+		memcpy(*tag_content, buf->ptr, *tag_length);
+		buf->ptr += *tag_length;
+		buf->bytes_used += *tag_length;
+	}
+
+	return 0;
+}
+
+static int
+asn1_put_tag(uint8_t tag, const void *tag_content, size_t tag_content_len,
+    buf_t *buf)
+{
+	int		 r;
+	const uint8_t	*orig_ptr = buf->ptr;
+	size_t		 delta;
+
+	r = sc_asn1_put_tag(tag, (const uint8_t *)tag_content, tag_content_len,
+	    buf->ptr, buf->size - buf->bytes_used, &buf->ptr);
 	if (r == SC_SUCCESS) {
-		buf->bytes_used += tag_content_len + 2;
+		delta = buf->ptr - orig_ptr;
+		if (buf->ptr < orig_ptr || buf->size - buf->bytes_used < delta)
+			return -1;
+		buf->bytes_used += delta;
 		return 0;
 	}
 
@@ -107,101 +148,6 @@ asn1_put_tag2(unsigned char tag, uint8_t a, uint8_t b, buf_t *buf)
 	const unsigned char tag_content[2] = { a, b };
 
 	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
-static int
-bertlv_put_tag(uint8_t tag, const uint8_t *data, uint16_t length, buf_t *buf)
-{
-	if (buf->bytes_used == buf->size)
-		return -1;
-	*(buf->ptr)++ = tag;
-	buf->bytes_used++;
-
-	if (length < 0x80) {
-		if (buf->bytes_used == buf->size)
-			return -1;
-		*(buf->ptr)++ = (uint8_t)length;
-		buf->bytes_used++;
-	} else if (length < 0xFF) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		*(buf->ptr)++ = 0x81;
-		*(buf->ptr)++ = (uint8_t)length;
-		buf->bytes_used += 2;
-	} else {
-		if (buf->size - buf->bytes_used < 3)
-			return -1;
-		*(buf->ptr)++ = 0x82;
-		*(buf->ptr)++ = (uint8_t)(length >> 8);
-		*(buf->ptr)++ = (uint8_t)(length & 0xFF);
-		buf->bytes_used += 3;
-	}
-
-	if (buf->bytes_used - buf->size < length)
-		return -1;
-
-	memcpy(buf->ptr, data, length);
-	buf->ptr += length;
-	buf->bytes_used += length;
-
-	return 0;
-}
-
-static int
-bertlv_get_tag(uint16_t tag, unsigned char **tag_content, uint16_t *tag_length,
-    buf_t *buf)
-{
-	uint8_t	c;
-
-	if (tag > 0xFF) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		if (*(buf->ptr)++ != (uint8_t)(tag >> 8) ||
-		    *(buf->ptr)++ != (uint8_t)(tag))
-			return -1;
-		buf->bytes_used += 2;
-	} else {
-		if (buf->size - buf->bytes_used < 1)
-			return -1;
-		if (*(buf->ptr)++ != (uint8_t)(tag))
-			return -1;
-		buf->bytes_used += 1;
-	}
-
-	if (buf->size - buf->bytes_used < 1)
-		return -1;
-
-	c = *(buf->ptr)++;
-	buf->bytes_used += 1;
-
-	if (c < 0x80)
-		*tag_length = c;
-	else if (c == 0x81) {
-		if (buf->size - buf->bytes_used < 1)
-			return -1;
-		buf->bytes_used += 1;
-		*tag_length = *(buf->ptr)++;
-	} else if (c == 0x82) {
-		if (buf->size - buf->bytes_used < 2)
-			return -1;
-		buf->bytes_used += 2;
-		*tag_length = *(buf->ptr)++ << 8;
-		*tag_length |= *(buf->ptr)++;
-	} else
-		return -1;
-
-	if (buf->size - buf->bytes_used < *tag_length)
-		return -1;
-
-	if (tag_content != NULL) {
-		if ((*tag_content = malloc(*tag_length)) == NULL)
-			return -1;
-		memcpy(*tag_content, buf->ptr, *tag_length);
-		buf->ptr += *tag_length;
-		buf->bytes_used += *tag_length;
-	}
-
-	return 0;
 }
 
 int
@@ -689,39 +635,40 @@ extract_curve_parameters(uint8_t *curve_der, ssize_t curve_der_len,
 
 	buf_init(&der, curve_der, curve_der_len);
 
-	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der))
+	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der))
 		errx(1, "%s: error decoding curve der 1", __func__);
 
 	/* XXX What is the meaning of this INTEGER tag set to 1? */
-	if (bertlv_get_tag(INTEGER_TAG, &tag, &taglen, &der) ||
+	if (asn1_get_tag(card->ctx, INTEGER_TAG, &tag, &taglen, &der) ||
 	    taglen != 1 || tag[0] != 0x01)
 		errx(1, "%s: error decoding curve der 2", __func__);
 
 	/* OID and P are grouped in a sequence. */
-	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    bertlv_get_tag(OID_TAG, &param->oid.data, &param->oid.len, &der) ||
-	    bertlv_get_tag(INTEGER_TAG, &param->p.data, &param->p.len, &der))
+	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    asn1_get_tag(card->ctx, OID_TAG, &param->oid.data, &param->oid.len,
+	    &der) || asn1_get_tag(card->ctx, INTEGER_TAG, &param->p.data,
+	    &param->p.len, &der))
 		errx(1, "%s: error decoding curve der 3", __func__);
 
 	/* A and B are grouped in a sequence. */
-	if (bertlv_get_tag(SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    bertlv_get_tag(OCTET_STRING_TAG, &param->a.data, &param->a.len,
-	    &der) || bertlv_get_tag(OCTET_STRING_TAG, &param->b.data,
-	    &param->b.len, &der))
+	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    asn1_get_tag(card->ctx, OCTET_STRING_TAG, &param->a.data,
+	    &param->a.len, &der) || asn1_get_tag(card->ctx, OCTET_STRING_TAG,
+	    &param->b.data, &param->b.len, &der))
 		errx(1, "%s: error decoding curve der 4", __func__);
 
 	free(tag);
 
 	/* Some curves have an optional seed value: skip it. */
-	if (der.ptr[0] == BIT_STRING_TAG && bertlv_get_tag(BIT_STRING_TAG, &tag,
-	    &taglen, &der))
+	if (der.ptr[0] == BIT_STRING_TAG && asn1_get_tag(card->ctx,
+	    BIT_STRING_TAG, &tag, &taglen, &der))
 		errx(1, "%s: error decoding curve der 5", __func__);
 
 	/* G, R and F are ungrouped, but appear sequentially. */
-	if (bertlv_get_tag(OCTET_STRING_TAG, &param->g.data, &param->g.len,
-	    &der) || bertlv_get_tag(INTEGER_TAG, &param->r.data, &param->r.len,
-	    &der) || bertlv_get_tag(INTEGER_TAG, &param->f.data, &param->f.len,
-	    &der))
+	if (asn1_get_tag(card->ctx, OCTET_STRING_TAG, &param->g.data,
+	    &param->g.len, &der) || asn1_get_tag(card->ctx, INTEGER_TAG,
+	    &param->r.data, &param->r.len, &der) || asn1_get_tag(card->ctx,
+	    INTEGER_TAG, &param->f.data, &param->f.len, &der))
 		errx(1, "%s: error decoding curve der 6", __func__);
 
 	/* Make sure that we consumed the whole buffer. */
@@ -740,7 +687,8 @@ extract_curve_oid(uint8_t *curve_oid, ssize_t curve_oid_len,
 
 	buf_init(&oid, curve_oid, curve_oid_len);
 
-	if (bertlv_get_tag(OID_TAG, &param->oid.data, &param->oid.len, &oid))
+	if (asn1_get_tag(card->ctx, OID_TAG, &param->oid.data, &param->oid.len,
+	    &oid))
 		errx(1, "%s: error decoding curve oid", __func__);
 }
 
@@ -842,13 +790,13 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 
 	buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
 
-        if (bertlv_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
-	    bertlv_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
-	    bertlv_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
-	    bertlv_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
-	    bertlv_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
-	    bertlv_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
-	    bertlv_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
+        if (asn1_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
+	    asn1_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
+	    asn1_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
+	    asn1_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
+	    asn1_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
+	    asn1_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
+	    asn1_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
 		errx(1, "%s: asn1 error", __func__);
 
 	/*
@@ -858,7 +806,7 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 
 	buf_init(&obj, obj_buf, sizeof(obj_buf));
 
-        if (bertlv_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
+        if (asn1_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
 		errx(1, "%s: asn1 error", __func__);
 
 	push_object(obj_buf, obj.bytes_used, sha256);
