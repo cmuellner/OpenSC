@@ -680,15 +680,15 @@ static int
 extract_curve_oid(struct sc_card *card, const sc_pkcs15_prkey_info_t *keyinfo,
     buf_t *payload)
 {
-	struct sc_pkcs15_ec_parameters	*param;
+	struct sc_ec_parameters *param;
 
-	if (keyinfo->params.len != sizeof(struct sc_pkcs15_ec_parameters)) {
+	if (keyinfo->params.len != sizeof(struct sc_ec_parameters)) {
 		sc_log(card->ctx, "invalid keyinfo->params.len=%zu",
 		    keyinfo->params.len);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	param = (struct sc_pkcs15_ec_parameters *)keyinfo->params.data;
+	param = (struct sc_ec_parameters *)keyinfo->params.data;
 	if (param == NULL) {
 		sc_log(card->ctx, "invalid param=%p", param);
 		return SC_ERROR_INVALID_ARGUMENTS;
@@ -973,7 +973,7 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
     sc_pkcs15_pubkey_t *pubkey)
 {
 	struct sc_cardctl_cardos5_genkey_info	 args;
-	struct sc_ec_params			*ecp = NULL;
+	struct sc_ec_parameters			*ecp = NULL;
 	uint8_t					 payload_buf[768];
 	uint8_t					 crt_buf[24];
 	buf_t					 payload;
@@ -1044,20 +1044,20 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 				goto parse_error;
 			}
 
-			ecp->der_len = encoded_oid.bytes_used;
-			ecp->der = encoded_oid_buf;
+			ecp->der.len = encoded_oid.bytes_used;
+			ecp->der.value = encoded_oid_buf;
 			ecp->type = 1;
 
-			pubkey->u.ec.params.der.value = calloc(1, ecp->der_len);
+			pubkey->u.ec.params.der.value = calloc(1, ecp->der.len);
 			if (pubkey->u.ec.params.der.value == NULL) {
 				sc_log(card->ctx, "calloc");
 				free(encoded_oid_buf);
 				goto parse_error;
 			}
 
-			memcpy(pubkey->u.ec.params.der.value, ecp->der,
-			    ecp->der_len);
-			pubkey->u.ec.params.der.len = ecp->der_len;
+			memcpy(pubkey->u.ec.params.der.value, ecp->der.value,
+			    ecp->der.len);
+			pubkey->u.ec.params.der.len = ecp->der.len;
 		} else {
 			if (asn1_get_tag(card->ctx, pubkey_parts[i], NULL,
 			    &taglen, &keybuf)) {
@@ -1466,7 +1466,7 @@ static int
 lookup_ecd(sc_profile_t *profile, sc_card_t *card,
     const sc_pkcs15_prkey_info_t *keyinfo)
 {
-	struct sc_pkcs15_ec_parameters	*param;
+	struct sc_ec_parameters		*param;
 	sc_file_t			*curvedb = NULL;
 	char				 entry[128];
 	char				 buf[128];
@@ -1476,13 +1476,13 @@ lookup_ecd(sc_profile_t *profile, sc_card_t *card,
 	int				 n;
 	int				 r;
 
-	if (keyinfo->params.len != sizeof(struct sc_pkcs15_ec_parameters)) {
+	if (keyinfo->params.len != sizeof(struct sc_ec_parameters)) {
 		sc_log(card->ctx, "invalid keyinfo->params.len=%zu",
 		    keyinfo->params.len);
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	param = (struct sc_pkcs15_ec_parameters *)keyinfo->params.data;
+	param = (struct sc_ec_parameters *)keyinfo->params.data;
 	if (param == NULL || param->named_curve == NULL ||
 	    param->der.value == NULL) {
 		sc_log(card->ctx, "invalid param=%p", param);
