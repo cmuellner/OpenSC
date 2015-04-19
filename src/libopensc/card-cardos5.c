@@ -262,11 +262,11 @@ cardos5_init(sc_card_t *card)
 
 	flags = SC_ALGORITHM_ECDSA_RAW | SC_ALGORITHM_ONBOARD_KEY_GEN;
 
-	_sc_card_add_ec_alg(card, 192, flags, 0);
-	_sc_card_add_ec_alg(card, 224, flags, 0);
-	_sc_card_add_ec_alg(card, 256, flags, 0);
-	_sc_card_add_ec_alg(card, 384, flags, 0);
-	_sc_card_add_ec_alg(card, 512, flags, 0);
+	_sc_card_add_ec_alg(card, 192, flags, 0, NULL);
+	_sc_card_add_ec_alg(card, 224, flags, 0, NULL);
+	_sc_card_add_ec_alg(card, 256, flags, 0, NULL);
+	_sc_card_add_ec_alg(card, 384, flags, 0, NULL);
+	_sc_card_add_ec_alg(card, 512, flags, 0, NULL);
 
 	return 0;
 }
