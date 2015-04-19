@@ -34,17 +34,23 @@
 
 #if !defined(_WIN32)
 #include <arpa/inet.h>  /* for htons() */
+#else
+#include <winsock2.h>
 #endif
 
 #include "config.h"
+#ifdef ENABLE_OPENSSL
 #include <openssl/aes.h>
 #ifdef HAVE_OPENSSL_CMAC_H
 #include <openssl/cmac.h>
 #endif
 #include <openssl/des.h>
+#endif /* ENABLE_OPENSSL */
 
-#include <err.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -169,10 +175,11 @@ get_cycle_phase(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	return ((int)buf[0]);
@@ -193,8 +200,8 @@ switch_adm2op(void)
 	 */
 	phase = get_cycle_phase();
 	if (phase != 0x20 && phase != 0x10)
-		errx(1, "%s: card must be in cycle phases 'administration' or "
-		    "'operational' cycle phase", __func__);
+		util_fatal("%s: card must be in cycle phases 'administration' "
+		    "or 'operational' cycle phase", __func__);
 
 	memset(&apdu, 0, sizeof(apdu));
 	apdu.cse = SC_APDU_CASE_1;
@@ -203,11 +210,12 @@ switch_adm2op(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
-		    apdu.sw2);
+		util_fatal("%s: command failed: %02x %02x", __func__,
+		    apdu.sw1, apdu.sw2);
 }
 
 void	usage(void);
@@ -224,23 +232,24 @@ load_file(const char *path, ssize_t min, ssize_t max, uint8_t **data,
 		usage();
 
 	if ((fd = open(path, O_RDONLY)) < 0)
-		err(1, "%s: open %s", __func__, path);
+		util_fatal("%s: open %s: %s", __func__, path, strerror(errno));
 
 	if (fstat(fd, &st) < 0)
-		err(1, "%s: fstat %s", __func__, path);
+		util_fatal("%s: fstat %s: %s", __func__, path, strerror(errno));
 
 	if (st.st_size < min || st.st_size > max)
-		errx(1, "%s: invalid file size: %s", __func__, path);
+		util_fatal("%s: invalid file size: %s", __func__, path);
 
 	*data_len = st.st_size;
 	if ((*data = calloc(1, *data_len)) == NULL)
-		err(1, "%s: calloc", __func__);
+		util_fatal("%s: calloc", __func__);
 
 	if ((n = read(fd, *data, *data_len)) != *data_len) {
 		if (n < 0)
-			err(1, "%s: read %s", __func__, path);
+			util_fatal("%s: read %s: %s", __func__, path,
+			    strerror(errno));
 		else
-			errx(1, "%s: short read: %s", __func__, path);
+			util_fatal("%s: short read: %s", __func__, path);
 	}
 
 	close(fd);
@@ -266,7 +275,7 @@ switch_keys(const char *apdu_path)
 	if (data_len > 4) {
 		/* Inconsistent LC or LE != 0. */
 		if (data[4] != data_len - 4)
-			errx(1, "%s: bogus apdu in %s", __func__, apdu_path);
+			util_fatal("%s: bogus apdu in %s", __func__, apdu_path);
 		if (data_len > 5) {
 			apdu.lc = data[4];
 			apdu.data = &data[5];
@@ -275,14 +284,15 @@ switch_keys(const char *apdu_path)
 	}
 
 	if (apdu.cla != 0x84 || apdu.ins != 0x24)
-		errx(1, "%s: bogus apdu in file %s", __func__, apdu_path);
+		util_fatal("%s: bogus apdu in file %s", __func__, apdu_path);
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	free(data);
@@ -335,7 +345,7 @@ aes_cmac(const uint8_t *data, size_t data_len, const uint8_t *key,
 
 	return 0;
 #else
-	warnx("%s: AES-CMAC support missing in OpenSSL", __func__);
+	util_warn("%s: AES-CMAC support missing in OpenSSL", __func__);
 	return -1;
 #endif
 }
@@ -452,7 +462,7 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 	int		 r;
 
 	if (key == NULL || key_len != 16 || data == NULL || data_len < 4)
-		errx(1, "%s: bogus arguments", __func__);
+		util_fatal("%s: bogus arguments", __func__);
 
 	/*
          * No extended APDUs are allowed, thus both le and lc are
@@ -463,11 +473,11 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 	else
 		lc = 0;
 	if ((lc && data_len > (size_t)5 + lc) || (lc == 0 && data_len == 5))
-		warnx("%s: bogus apdu; LE != 0", __func__);
+		util_warn("%s: bogus apdu; LE != 0", __func__);
 
 	len = MAC_HDR + lc;
 	if ((mac_buf = calloc(1, len)) == NULL)
-		err(1, "%s: calloc", __func__);
+		util_fatal("%s: calloc", __func__);
 
 	/* Build data to be mac'ed */
 	memcpy(mac_buf, data + 1, 3);
@@ -476,13 +486,13 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 		memcpy(mac_buf + MAC_HDR, data + 5, lc);
 
 	if (aes_cmac(mac_buf, len, key, 16, &mac, &mac_len) < 0)
-		errx(1, "%s: aes_cmac() failed", __func__);
+		util_fatal("%s: aes_cmac() failed", __func__);
 
 	free(mac_buf);
 
 	w = lc + mac_len + ISO_PAD_LEN(lc + mac_len, AES_BLOCK_SIZE);
 	if ((enc_buf = calloc(1, w)) == NULL)
-		err(1, "%s: calloc", __func__);
+		util_fatal("%s: calloc", __func__);
 
 	/* Build data to be encrypted */
 	if (lc > 0)
@@ -492,13 +502,13 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 
 	/* Add ISO padding for AES CBC */
 	if (add_iso_pad(enc_buf, w, lc + mac_len, AES_BLOCK_SIZE) < 0)
-		errx(1, "%s: add_iso_pad() failed", __func__);
+		util_fatal("%s: add_iso_pad() failed", __func__);
 
 	/* Build the SM-APDU, which always includes lc. */
 	len = w + 5;
 
 	if ((sm_buf = calloc(1, len)) == NULL)
-		err(1, "%s: calloc", __func__);
+		util_fatal("%s: calloc", __func__);
 
 	/* Build header */
 	sm_buf[0] = data[0] | 0x04;
@@ -507,7 +517,7 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 
 	/* Encrypt data */
 	if (aes_cbc(enc_buf, w, key, key_len, &payload, &payload_len) < 0)
-		errx(1, "%s: aes_cbc() failed", __func__);
+		util_fatal("%s: aes_cbc() failed", __func__);
 
 	memcpy(sm_buf + 5, payload, payload_len);
 	free(enc_buf);
@@ -525,17 +535,18 @@ smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 }
 #else /* !ENABLE_OPENSSL */
 void
 smmodex4h(const uint8_t *data, size_t data_len, uint8_t *key, size_t key_len)
 {
-	errx(1, "%s: not available without openssl", __func__);
+	util_fatal("%s: not available without OpenSSL", __func__);
 }
 #endif /* ENABLE_OPENSSL */
 
@@ -631,44 +642,44 @@ extract_curve_parameters(uint8_t *curve_der, ssize_t curve_der_len,
 #define SEQUENCE_TAG (SC_ASN1_TAG_SEQUENCE | SC_ASN1_TAG_CONSTRUCTED)
 
 	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der))
-		errx(1, "%s: error decoding curve der 1", __func__);
+		util_fatal("%s: error decoding curve der 1", __func__);
 
 	/* XXX What is the meaning of this INTEGER tag set to 1? */
 	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER, &tag, &taglen, &der) ||
 	    taglen != 1 || tag[0] != 0x01)
-		errx(1, "%s: error decoding curve der 2", __func__);
+		util_fatal("%s: error decoding curve der 2", __func__);
 
 	/* OID and P are grouped in a sequence. */
 	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
 	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
 	    &param->oid.len, &der) || asn1_get_tag(card->ctx,
 	    SC_ASN1_TAG_INTEGER, &param->p.data, &param->p.len, &der))
-		errx(1, "%s: error decoding curve der 3", __func__);
+		util_fatal("%s: error decoding curve der 3", __func__);
 
 	/* A and B are grouped in a sequence. */
 	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
 	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->a.data,
 	    &param->a.len, &der) || asn1_get_tag(card->ctx,
 	    SC_ASN1_TAG_OCTET_STRING, &param->b.data, &param->b.len, &der))
-		errx(1, "%s: error decoding curve der 4", __func__);
+		util_fatal("%s: error decoding curve der 4", __func__);
 
 	free(tag);
 
 	/* Some curves have an optional seed value: skip it. */
 	if (der.ptr[0] == SC_ASN1_TAG_BIT_STRING && asn1_get_tag(card->ctx,
 	    SC_ASN1_TAG_BIT_STRING, &tag, &taglen, &der))
-		errx(1, "%s: error decoding curve der 5", __func__);
+		util_fatal("%s: error decoding curve der 5", __func__);
 
 	/* G, R and F are ungrouped, but appear sequentially. */
 	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->g.data,
 	    &param->g.len, &der) || asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER,
 	    &param->r.data, &param->r.len, &der) || asn1_get_tag(card->ctx,
 	    SC_ASN1_TAG_INTEGER, &param->f.data, &param->f.len, &der))
-		errx(1, "%s: error decoding curve der 6", __func__);
+		util_fatal("%s: error decoding curve der 6", __func__);
 
 	/* Make sure that we consumed the whole buffer. */
 	if (der.size != der.bytes_used)
-		errx(1, "%s: error decoding curve der 7", __func__);
+		util_fatal("%s: error decoding curve der 7", __func__);
 }
 
 void
@@ -684,7 +695,7 @@ extract_curve_oid(uint8_t *curve_oid, ssize_t curve_oid_len,
 
 	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
 	    &param->oid.len, &oid))
-		errx(1, "%s: error decoding curve oid", __func__);
+		util_fatal("%s: error decoding curve oid", __func__);
 }
 
 /*
@@ -702,7 +713,7 @@ push_object(const uint8_t *object, size_t object_len, uint8_t *sha256)
 	int					r;
 
 	if (object_len > UINT16_MAX)
-		errx(1, "%s: invalid len %zu", __func__, object_len);
+		util_fatal("%s: invalid len %zu", __func__, object_len);
 
 	for (done = 0; done < object_len; done += n) {
 		buf_t	payload;
@@ -713,7 +724,7 @@ push_object(const uint8_t *object, size_t object_len, uint8_t *sha256)
 			uint8_t len_hi = (uint8_t)(object_len >> 8);
 			uint8_t len_lo = (uint8_t)(object_len & 0xFF);
 			if (asn1_put_tag2(0x80, len_hi, len_lo, &payload))
-				errx(1, "%s: asn1 error", __func__);
+				util_fatal("%s: asn1 error", __func__);
 			args.append = 0; /* allocate new object */
 		} else
 			args.append = 1; /* appending to existing object */
@@ -724,7 +735,7 @@ push_object(const uint8_t *object, size_t object_len, uint8_t *sha256)
 
 		if (asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_DATA_TAG,
 		    object + done, n, &payload))
-			errx(1, "%s: asn1 error", __func__);
+			util_fatal("%s: asn1 error", __func__);
 
 		args.data = payload_buf;
 		args.len = payload.bytes_used;
@@ -732,7 +743,7 @@ push_object(const uint8_t *object, size_t object_len, uint8_t *sha256)
 		r = sc_card_ctl(card, SC_CARDCTL_CARDOS_ACCUMULATE_OBJECT_DATA,
 		    &args);
 		if (r != SC_SUCCESS)
-			errx(1, "%s: sc_card_ctl: %s", __func__,
+			util_fatal("%s: sc_card_ctl: %s", __func__,
 			    sc_strerror(r));
 	}
 
@@ -770,12 +781,12 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	pin_id = sc_pkcs15init_get_pin_reference(p15card, profile,
 	    SC_AC_SYMBOLIC, SC_PKCS15INIT_SO_PIN);
 	if (pin_id < 0)
-		errx(1, "%s: invalid pin id: %d", __func__, pin_id);
+		util_fatal("%s: invalid pin id: %d", __func__, pin_id);
 
 	if (get_cycle_phase() == 0x10)
 		switch_adm2op();
 	if (get_cycle_phase() != 0x20)
-		errx(1, "%s: card not in cycle phase 'administration'",
+		util_fatal("%s: card not in cycle phase 'administration'",
 		    __func__);
 
 	/*
@@ -792,7 +803,7 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	    asn1_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
 	    asn1_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
 	    asn1_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
-		errx(1, "%s: asn1 error", __func__);
+		util_fatal("%s: asn1 error", __func__);
 
 	/*
 	 * We then wrap this ECD object inside a CONSTRUCTED_DATA_TAG object.
@@ -802,7 +813,7 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	buf_init(&obj, obj_buf, sizeof(obj_buf));
 
         if (asn1_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
-		errx(1, "%s: asn1 error", __func__);
+		util_fatal("%s: asn1 error", __func__);
 
 	push_object(obj_buf, obj.bytes_used, sha256);
 
@@ -817,7 +828,7 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	    asn1_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
 	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
 	    sizeof(sha256), &payload))
-		errx(1, "%s: asn1 error", __func__);
+		util_fatal("%s: asn1 error", __func__);
 
 	memset(&apdu, 0, sizeof(apdu));
 	apdu.cse = SC_APDU_CASE_3_SHORT;
@@ -835,15 +846,16 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	r = sc_pkcs15init_verify_secret(profile, p15card, NULL, SC_AC_CHV,
 	    pin_id);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_pkcs15init_verify_secret: %s", __func__,
+		util_fatal("%s: sc_pkcs15init_verify_secret: %s", __func__,
 		    sc_strerror(r));
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 }
 
@@ -867,18 +879,18 @@ configure_curve(const char *ecd_slot_str, const char *curve_oid_path,
 
 	r = sc_pkcs15_bind(card, NULL, &p15card);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_pkcs15_bind: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_pkcs15_bind: %s", __func__, sc_strerror(r));
 
 #if defined (__Bitrig__) || defined (__OpenBSD__)
 	ecd_slot = strtonum(ecd_slot_str, 1, UINT8_MAX, &errstr);
 	if (errstr)
-		errx(1, "%s: strtonum %s", __func__, ecd_slot_str);
+		util_fatal("%s: strtonum %s", __func__, ecd_slot_str);
 #else
 	ecd_slot = (uint8_t)atoi(ecd_slot_str);
 #endif
 
-	load_file(curve_der_path, 0, SSIZE_MAX, &curve_der, &curve_der_len);
-	load_file(curve_oid_path, 0, SSIZE_MAX, &curve_oid, &curve_oid_len);
+	load_file(curve_der_path, 0, INT_MAX, &curve_der, &curve_der_len);
+	load_file(curve_oid_path, 0, INT_MAX, &curve_oid, &curve_oid_len);
 
 	extract_curve_parameters(curve_der, curve_der_len, &param);
 	extract_curve_oid(curve_oid, curve_oid_len, &param);
@@ -907,10 +919,11 @@ get_serial(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	/*
@@ -943,10 +956,11 @@ get_info(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	buf[sizeof(buf)-1] = '\0';
@@ -957,10 +971,11 @@ get_info(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	printf("model: ");
@@ -1024,10 +1039,11 @@ get_info(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	printf("pkgldkey version: %02x\n", buf[0]);
@@ -1040,49 +1056,51 @@ get_info(void)
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	printf("xram size (in kbytes): %u\n",
-	    (unsigned int)ntohs(*(u_int16_t *)&buf[0]));
+	    (unsigned int)ntohs(*(uint16_t *)&buf[0]));
 
 	printf("eeprom size (in kbytes): %u\n",
-	    (unsigned int)ntohs(*(u_int16_t *)&buf[2]));
+	    (unsigned int)ntohs(*(uint16_t *)&buf[2]));
 
 	apdu.p2 = 0x8a;
 	apdu.resplen = sizeof(buf);
 
 	r = sc_transmit_apdu(card, &apdu);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_transmit_apdu: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_transmit_apdu: %s", __func__,
+		    sc_strerror(r));
 
 	if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00)
-		errx(1, "%s: command failed: %02x %02x", __func__, apdu.sw1,
+		util_fatal("%s: command failed: %02x %02x", __func__, apdu.sw1,
 		    apdu.sw2);
 
 	printf("eeprom free space (in kbytes): %u\n",
-	    (unsigned int)ntohs(*(u_int16_t *)&buf[0])/1024);
+	    (unsigned int)ntohs(*(uint16_t *)&buf[0])/1024);
 }
 
 void
 once(int ch, const char **arg, const char *val)
 {
 	if (*arg != NULL)
-		errx(1, "option -%c may only be specified once", (char)ch);
+		util_fatal("option -%c may only be specified once", (char)ch);
 	*arg = val;
 }
 
-extern char	*__progname;
+#define PROGNAME "cardos5-tool"
 
 void
 usage(void)
 {
 	fprintf(stderr, "usage: %s [-EFhKLvW] [-C ecd_slot] [-a apdu] "
 	    "[-d curve_der] [-k key] [-o curve_oid] [-p pin] [-r reader] "
-	    "[-s seed]\n", __progname);
+	    "[-s seed]\n", PROGNAME);
 	exit(1);
 }
 
@@ -1098,18 +1116,21 @@ connect_card(sc_context_t **ctx, const char *reader, int wait, int verbosity)
 	int			r;
 
 	memset(&ctxpar, 0, sizeof(ctxpar));
-	ctxpar.app_name = __progname;
+	ctxpar.app_name = PROGNAME;
 	r = sc_context_create(ctx, &ctxpar);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_context_create: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_context_create: %s", __func__,
+		    sc_strerror(r));
 
 	r = util_connect_card(*ctx, &card, reader, wait, verbosity);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: util_connect_card: %s", __func__, sc_strerror(r));
+		util_fatal("%s: util_connect_card: %s", __func__,
+		    sc_strerror(r));
 
 	r = sc_pkcs15init_bind(card, "pkcs15", NULL, NULL, &profile);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_pkcs15init_bind: %s", __func__, sc_strerror(r));
+		util_fatal("%s: sc_pkcs15init_bind: %s", __func__,
+		    sc_strerror(r));
 
 	sc_pkcs15init_set_callbacks(&callbacks);
 }
@@ -1133,7 +1154,7 @@ list_curves(void)
 	sc_format_path("3F0050157EAD", &path);
 	r = sc_select_file(card, &path, NULL);
 	if (r != SC_SUCCESS)
-		errx(1, "%s: sc_select_file", __func__);
+		util_fatal("%s: sc_select_file", __func__);
 
 	while ((r = sc_read_record(card, 0, (uint8_t *)buf,
 	    sizeof(buf) - 1, SC_RECORD_NEXT)) > 0) {
@@ -1217,7 +1238,7 @@ main(int argc, char **argv)
 
 	if (do_curve)
 		if (do_format || do_key)
-			errx(1, "-C can't be combined with options -FK");
+			util_fatal("-C can't be combined with options -FK");
 
 	connect_card(&ctx, reader, do_wait, verbosity);
 
