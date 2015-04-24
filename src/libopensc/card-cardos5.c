@@ -81,136 +81,10 @@ static struct sc_atr_table cardos5_atrs[] = {
 	{ NULL, NULL, NULL, 0, 0, NULL }
 };
 
-typedef struct {
-	uint8_t	*ptr;
-	size_t	 size;
-	size_t	 bytes_used;
-} buf_t;
-
-typedef struct {
-	uint8_t *encoded_ptr;
-	size_t	 encoded_len;
-	size_t	 raw_len;
-} coordinate_t;
-
 struct cardos5_private_data {
 	/* Current Security Environment Algorithm */
 	unsigned int	cse_algorithm;
 };
-
-static void
-buf_init(buf_t *buf, uint8_t *ptr, size_t size)
-{
-	buf->ptr = ptr;
-	buf->size = size;
-	buf->bytes_used = 0;
-}
-
-static int
-asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
-    uint16_t *tag_length, buf_t *buf)
-{
-	const uint8_t	*tag_ptr;
-	size_t		 tag_len; /* size_t version of tag_length */
-	size_t		 delta;
-
-	tag_ptr = sc_asn1_find_tag(ctx, buf->ptr, buf->size - buf->bytes_used,
-	    tag, &tag_len);
-	if (tag_ptr == NULL || tag_ptr < buf->ptr)
-		return -1;
-
-	delta = tag_ptr - buf->ptr;
-	if (buf->size - buf->bytes_used < delta)
-		return -1;
-	buf->ptr += delta;
-	buf->bytes_used += delta;
-
-	if (tag_len > UINT16_MAX)
-		return -1;
-	*tag_length = tag_len;
-	if (buf->size - buf->bytes_used < *tag_length)
-		return -1;
-
-	if (tag_content != NULL) {
-		if ((*tag_content = malloc(*tag_length)) == NULL)
-			return -1;
-		memcpy(*tag_content, buf->ptr, *tag_length);
-		buf->ptr += *tag_length;
-		buf->bytes_used += *tag_length;
-	}
-
-	return 0;
-}
-
-static int
-asn1_put_tag(uint8_t tag, const void *tag_content, size_t tag_content_len,
-    buf_t *buf)
-{
-	int		 r;
-	const uint8_t	*orig_ptr = buf->ptr;
-	size_t		 delta;
-
-	r = sc_asn1_put_tag(tag, (const uint8_t *)tag_content, tag_content_len,
-	    buf->ptr, buf->size - buf->bytes_used, &buf->ptr);
-	if (r == SC_SUCCESS) {
-		delta = buf->ptr - orig_ptr;
-		if (buf->ptr < orig_ptr || buf->size - buf->bytes_used < delta)
-			return -1;
-		buf->bytes_used += delta;
-		return 0;
-	}
-
-	return -1;
-}
-
-static int
-asn1_put_tag0(uint8_t tag, buf_t *buf)
-{
-	return asn1_put_tag(tag, NULL, 0, buf);
-}
-
-static int
-asn1_put_tag1(uint8_t tag, uint8_t tag_value, buf_t *buf)
-{
-	const uint8_t	tag_content[1] = { tag_value };
-
-	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
-static int
-add_acl_tag(uint8_t am_byte, unsigned int ac, unsigned int key_ref, buf_t *buf)
-{
-	uint8_t	crt_buf[16];
-	buf_t	crt;
-
-	if (am_byte != 0xff)
-		if (asn1_put_tag1(ARL_ACCESS_MODE_BYTE_TAG, am_byte, buf))
-			return -1;
-
-	switch (ac) {
-	case SC_AC_NONE:
-		/* SC_AC_NONE means operation ALWAYS allowed. */
-		return asn1_put_tag0(ARL_ALWAYS_TAG, buf);
-	case SC_AC_NEVER:
-		return asn1_put_tag0(ARL_NEVER_TAG, buf);
-	case SC_AC_CHV:
-	case SC_AC_TERM:
-	case SC_AC_AUT:
-		if ((key_ref & BACKTRACK_BIT) || key_ref > UINT8_MAX)
-			return -1;
-
-		buf_init(&crt, crt_buf, sizeof(crt_buf));
-
-		if (asn1_put_tag1(CRT_TAG_PINREF, (uint8_t)key_ref, &crt) ||
-		    asn1_put_tag1(CRT_TAG_KUQ, KUQ_USER_AUTH, &crt) ||
-		    asn1_put_tag(ARL_USER_AUTH_TAG, crt_buf, crt.bytes_used,
-		    buf))
-			return -1;
-		return 0;
-	default:
-		return -1;
-	}
-}
 
 static int
 cardos5_match_card(sc_card_t *card)
@@ -316,19 +190,19 @@ cardos5_read_record(sc_card_t *card, unsigned int record_number, uint8_t *buf,
 }
 
 static int
-parse_entry(struct sc_context *ctx, buf_t *entries, uint8_t *entry_buf,
+parse_entry(struct sc_context *ctx, cardos5_buf_t *entries, uint8_t *entry_buf,
     uint16_t entry_len, uint8_t *next_offset)
 {
 	uint8_t		 tag;
 	uint8_t		*tag_ptr;
 	uint16_t	 tag_len;
-	buf_t		 entry;
+	cardos5_buf_t	 entry;
 
-	buf_init(&entry, entry_buf, entry_len);
+	cardos5_buf_init(&entry, entry_buf, entry_len);
 
 	while (entry.size - entry.bytes_used >= 2) {
 		tag = entry.ptr[0];
-		if (asn1_get_tag(ctx, tag, &tag_ptr, &tag_len, &entry)) {
+		if (cardos5_get_tag(ctx, tag, &tag_ptr, &tag_len, &entry)) {
 			sc_log(ctx, "asn1 error");
 			return SC_ERROR_UNKNOWN_DATA_RECEIVED;
 		}
@@ -369,14 +243,15 @@ parse_entry(struct sc_context *ctx, buf_t *entries, uint8_t *entry_buf,
 }
 
 static int
-list_page(sc_card_t *card, buf_t *entries, uint8_t offset, uint8_t *next_offset)
+list_page(sc_card_t *card, cardos5_buf_t *entries, uint8_t offset,
+    uint8_t *next_offset)
 {
 	struct sc_context	*ctx = card->ctx;
 	sc_apdu_t		 apdu;
 	uint8_t			 page_buf[256];
 	uint8_t			*entry = NULL;
 	uint16_t		 entry_len;
-	buf_t			 page;
+	cardos5_buf_t		 page;
 	int			 r;
 
 	memset(&apdu, 0, sizeof(apdu));
@@ -404,9 +279,10 @@ list_page(sc_card_t *card, buf_t *entries, uint8_t offset, uint8_t *next_offset)
 		return SC_ERROR_WRONG_LENGTH;
 	}
 
-	buf_init(&page, page_buf, apdu.resplen);
+	cardos5_buf_init(&page, page_buf, apdu.resplen);
 
-	while (!asn1_get_tag(ctx, DIR_ENTRY_TAG, &entry, &entry_len, &page)) {
+	while (cardos5_get_tag(ctx, DIR_ENTRY_TAG, &entry, &entry_len,
+	    &page) == 0) {
 		r = parse_entry(ctx, entries, entry, entry_len, next_offset);
 		free(entry);
 		if (r != SC_SUCCESS)
@@ -426,13 +302,13 @@ list_page(sc_card_t *card, buf_t *entries, uint8_t offset, uint8_t *next_offset)
 static int
 cardos5_list_files(sc_card_t *card, unsigned char *buf, size_t buflen)
 {
-	uint8_t	offset;
-	uint8_t	next_offset;
-	buf_t	entries;
-	int	r;
+	uint8_t		offset;
+	uint8_t		next_offset;
+	cardos5_buf_t	entries;
+	int		r;
 
 	next_offset = 0;
-	buf_init(&entries, buf, buflen);
+	cardos5_buf_init(&entries, buf, buflen);
 
 	do {
 		offset = next_offset;
@@ -751,13 +627,13 @@ cardos5_select_file(sc_card_t *card, const sc_path_t *path,
 }
 
 static int
-construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
+construct_df_fcp(sc_card_t *card, const sc_file_t *df, cardos5_buf_t *fcp)
 {
 	const sc_acl_entry_t	*e = NULL;
 	uint8_t			 df_size[2];
 	uint8_t			 arl_buf[128];
 	uint8_t			 cmd[4];
-	buf_t			 arl;
+	cardos5_buf_t		 arl;
 	int			 i;
 
 	if (df->size > UINT16_MAX) {
@@ -768,19 +644,19 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 	df_size[0] = (df->size >> 8) & 0xff;
 	df_size[1] = (df->size & 0xff);
 
-	if (asn1_put_tag1(FCP_TAG_DESCRIPTOR, FCP_TYPE_DF, fcp) ||
-	    asn1_put_tag(FCP_TAG_DF_SIZE, df_size, sizeof(df_size), fcp)) {
+	if (cardos5_put_tag1(FCP_TAG_DESCRIPTOR, FCP_TYPE_DF, fcp) ||
+	    cardos5_put_tag(FCP_TAG_DF_SIZE, df_size, sizeof(df_size), fcp)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	if (df->namelen != 0 && asn1_put_tag(FCP_TAG_DF_NAME, df->name,
+	if (df->namelen != 0 && cardos5_put_tag(FCP_TAG_DF_NAME, df->name,
 	    df->namelen, fcp)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&arl, arl_buf, sizeof(arl_buf));
+	cardos5_buf_init(&arl, arl_buf, sizeof(arl_buf));
 
 	e = sc_file_get_acl_entry(df, SC_AC_OP_UPDATE);
 	if (e != NULL) {
@@ -788,8 +664,8 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 		cmd[1] = CARDOS5_PUT_DATA_INS;
 		cmd[2] = CARDOS5_PUT_DATA_ECD_P1;
 		cmd[3] = CARDOS5_PUT_DATA_ECD_P2;
-		if (asn1_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
-		    add_acl_tag(0xff, e->method, e->key_ref, &arl)) {
+		if (cardos5_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
+		    cardos5_add_acl(0xff, e->method, e->key_ref, &arl)) {
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		}
 
@@ -808,7 +684,7 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 			}
 		}
 
-		if (add_acl_tag(df_acl[i].am_byte, ac, keyref, &arl)) {
+		if (cardos5_add_acl(df_acl[i].am_byte, ac, keyref, &arl)) {
 			sc_log(card->ctx, "could not add acl tag");
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		}
@@ -821,8 +697,8 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 	cmd[1] = CARDOS5_PHASE_CONTROL_INS;
 	cmd[2] = CARDOS5_PHASE_CONTROL_P1_TOGGLE;
 	cmd[3] = CARDOS5_PHASE_CONTROL_P2_TOGGLE;
-	if (asn1_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
-	    asn1_put_tag0(ARL_ALWAYS_TAG, &arl)) {
+	if (cardos5_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
+	    cardos5_put_tag0(ARL_ALWAYS_TAG, &arl)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -834,8 +710,8 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 	cmd[1] = CARDOS5_ACCUMULATE_OBJECT_DATA_INS;
 	cmd[2] = CARDOS5_ACCUMULATE_OBJECT_DATA_P1_NEW;
 	cmd[3] = 0x00;
-	if (asn1_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
-	    asn1_put_tag0(ARL_ALWAYS_TAG, &arl)) {
+	if (cardos5_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
+	    cardos5_put_tag0(ARL_ALWAYS_TAG, &arl)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -844,13 +720,13 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 	 * Always allow ACCUMULATE OBJECT DATA for existing objects.
 	 */
 	cmd[2] = CARDOS5_ACCUMULATE_OBJECT_DATA_P1_APPEND;
-	if (asn1_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
-	    asn1_put_tag0(ARL_ALWAYS_TAG, &arl)) {
+	if (cardos5_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
+	    cardos5_put_tag0(ARL_ALWAYS_TAG, &arl)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	if (asn1_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, fcp)) {
+	if (cardos5_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, fcp)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -859,13 +735,13 @@ construct_df_fcp(sc_card_t *card, const sc_file_t *df, buf_t *fcp)
 }
 
 static int
-construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
+construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, cardos5_buf_t *fcp)
 {
-	uint8_t file_type;
-	uint8_t	ef_size[2];
-	uint8_t	arl_buf[96];
-	buf_t	arl;
-	int	i;
+	uint8_t		file_type;
+	uint8_t		ef_size[2];
+	uint8_t		arl_buf[96];
+	cardos5_buf_t	arl;
+	int		i;
 
 	if (ef->ef_structure == SC_FILE_EF_TRANSPARENT)
 		file_type = FCP_TYPE_BINARY_EF;
@@ -885,14 +761,14 @@ construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
 	ef_size[0] = (ef->size >> 8) & 0xff;
 	ef_size[1] = (ef->size & 0xff);
 
-	if (asn1_put_tag1(FCP_TAG_DESCRIPTOR, file_type, fcp) ||
-	    asn1_put_tag(FCP_TAG_EF_SIZE, ef_size, sizeof(ef_size), fcp) ||
-	    asn1_put_tag0(FCP_TAG_EF_SFID, fcp)) {
+	if (cardos5_put_tag1(FCP_TAG_DESCRIPTOR, file_type, fcp) ||
+	    cardos5_put_tag(FCP_TAG_EF_SIZE, ef_size, sizeof(ef_size), fcp) ||
+	    cardos5_put_tag0(FCP_TAG_EF_SFID, fcp)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&arl, arl_buf, sizeof(arl_buf));
+	cardos5_buf_init(&arl, arl_buf, sizeof(arl_buf));
 
 	/* Populate ARL. */
 	for (i = 0; i < ef_acl_n; i++) {
@@ -908,13 +784,13 @@ construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
 			}
 		}
 
-		if (add_acl_tag(ef_acl[i].am_byte, ac, keyref, &arl)) {
+		if (cardos5_add_acl(ef_acl[i].am_byte, ac, keyref, &arl)) {
 			sc_log(card->ctx, "could not add acl tag");
 			return SC_ERROR_BUFFER_TOO_SMALL;
 		}
 	}
 
-	if (asn1_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, fcp)) {
+	if (cardos5_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, fcp)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -923,14 +799,14 @@ construct_ef_fcp(sc_card_t *card, const sc_file_t *ef, buf_t *fcp)
 }
 
 static int
-construct_fcp(sc_card_t *card, const sc_file_t *file, buf_t *buf)
+construct_fcp(sc_card_t *card, const sc_file_t *file, cardos5_buf_t *buf)
 {
-	uint8_t	file_id[2];
-	uint8_t	fcp_buf[128];
-	buf_t	fcp;
-	int	r;
+	uint8_t		file_id[2];
+	uint8_t		fcp_buf[128];
+	cardos5_buf_t	fcp;
+	int		r;
 
-	buf_init(&fcp, fcp_buf, sizeof(fcp_buf));
+	cardos5_buf_init(&fcp, fcp_buf, sizeof(fcp_buf));
 
 	switch (file->type) {
 	case SC_FILE_TYPE_DF:
@@ -957,12 +833,12 @@ construct_fcp(sc_card_t *card, const sc_file_t *file, buf_t *buf)
 	file_id[0] = (file->id >> 8) & 0xff;
 	file_id[1] = (file->id & 0xff);
 
-	if (asn1_put_tag(FCP_TAG_FILEID, file_id, sizeof(file_id), &fcp)) {
+	if (cardos5_put_tag(FCP_TAG_FILEID, file_id, sizeof(file_id), &fcp)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	if (asn1_put_tag(FCP_TAG_START, fcp_buf, fcp.bytes_used, buf)) {
+	if (cardos5_put_tag(FCP_TAG_START, fcp_buf, fcp.bytes_used, buf)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -975,10 +851,10 @@ cardos5_create_file(sc_card_t *card, sc_file_t *file)
 {
 	sc_apdu_t	apdu;
 	uint8_t		fcp_buf[SC_MAX_APDU_BUFFER_SIZE];
-	buf_t		fcp;
+	cardos5_buf_t	fcp;
 	int		r;
 
-	buf_init(&fcp, fcp_buf, sizeof(fcp_buf));
+	cardos5_buf_init(&fcp, fcp_buf, sizeof(fcp_buf));
 
 	if ((r = construct_fcp(card, file, &fcp)) != SC_SUCCESS) {
 		sc_log(card->ctx, "could not construct fcp");
@@ -1018,7 +894,7 @@ cardos5_set_security_env(sc_card_t *card, const sc_security_env_t *env,
 	struct cardos5_private_data	*priv;
 	sc_apdu_t			 apdu;
 	uint8_t				 data[16];
-	buf_t				 buf;
+	cardos5_buf_t			 buf;
 	int				 r;
 
 	priv = card->drv_data;
@@ -1045,10 +921,10 @@ cardos5_set_security_env(sc_card_t *card, const sc_security_env_t *env,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	buf_init(&buf, data, sizeof(data));
+	cardos5_buf_init(&buf, data, sizeof(data));
 
-	if (asn1_put_tag1(CRT_TAG_KEYREF, env->key_ref[0], &buf) ||
-	    asn1_put_tag1(CRT_TAG_KUQ, KUQ_DECRYPT, &buf)) {
+	if (cardos5_put_tag1(CRT_TAG_KEYREF, env->key_ref[0], &buf) ||
+	    cardos5_put_tag1(CRT_TAG_KUQ, KUQ_DECRYPT, &buf)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -1071,8 +947,14 @@ cardos5_set_security_env(sc_card_t *card, const sc_security_env_t *env,
 	return SC_SUCCESS;
 }
 
+typedef struct {
+	uint8_t *encoded_ptr;
+	size_t	 encoded_len;
+	size_t	 raw_len;
+} coordinate_t;
+
 static int
-extract_coordinate(sc_card_t *card, coordinate_t *c, buf_t *signature)
+extract_coordinate(sc_card_t *card, coordinate_t *c, cardos5_buf_t *signature)
 {
 	if (signature->size - signature->bytes_used < c->raw_len ||
 	    c->raw_len >= INT8_MAX)
@@ -1119,7 +1001,8 @@ extract_coordinate(sc_card_t *card, coordinate_t *c, buf_t *signature)
 }
 
 static int
-get_point(const coordinate_t *X, const coordinate_t *Y, buf_t *encoded_sig)
+get_point(const coordinate_t *X, const coordinate_t *Y,
+    cardos5_buf_t *encoded_sig)
 {
 	uint8_t	*point;
 	size_t	 point_len;
@@ -1135,7 +1018,7 @@ get_point(const coordinate_t *X, const coordinate_t *Y, buf_t *encoded_sig)
 	memcpy(point, X->encoded_ptr, X->encoded_len);
 	memcpy(point + X->encoded_len, Y->encoded_ptr, Y->encoded_len);
 
-	if (asn1_put_tag(0x30, point, point_len, encoded_sig)) {
+	if (cardos5_put_tag(0x30, point, point_len, encoded_sig)) {
 		free(point);
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -1152,8 +1035,8 @@ encode_ec_sig(sc_card_t *card, uint8_t *sig, size_t siglen, size_t sigbufsiz)
 	coordinate_t	 Y;
 	uint8_t		*raw_sig_buf;
 	size_t		 coordinate_raw_len;
-	buf_t		 raw_sig;
-	buf_t		 encoded_sig;
+	cardos5_buf_t	 raw_sig;
+	cardos5_buf_t	 encoded_sig;
 	int		 r;
 
 	if (siglen < 4 || siglen > sigbufsiz || (siglen % 2) != 0) {
@@ -1180,7 +1063,7 @@ encode_ec_sig(sc_card_t *card, uint8_t *sig, size_t siglen, size_t sigbufsiz)
 	memcpy(raw_sig_buf, sig, siglen);
 	memset(sig, 0, sigbufsiz);
 
-	buf_init(&raw_sig, raw_sig_buf, siglen);
+	cardos5_buf_init(&raw_sig, raw_sig_buf, siglen);
 
 	memset(&X, 0, sizeof(X));
 	memset(&Y, 0, sizeof(Y));
@@ -1193,7 +1076,7 @@ encode_ec_sig(sc_card_t *card, uint8_t *sig, size_t siglen, size_t sigbufsiz)
 		goto bail;
 	}
 
-	buf_init(&encoded_sig, sig, sigbufsiz);
+	cardos5_buf_init(&encoded_sig, sig, sigbufsiz);
 
 	if ((r = get_point(&X, &Y, &encoded_sig))) {
 		sc_log(card->ctx, "could not decode signature");
@@ -1331,7 +1214,8 @@ cardos5_compute_signature(sc_card_t *card, const unsigned char *data,
 }
 
 static int
-accumulate_object_data(sc_card_t *card, struct sc_cardctl_cardos_acc_obj_info *args)
+accumulate_object_data(sc_card_t *card,
+    struct sc_cardctl_cardos_acc_obj_info *args)
 {
 	sc_apdu_t	apdu;
 	uint8_t		rbuf[64];

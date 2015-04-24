@@ -245,4 +245,20 @@ struct sc_cardos5_am_byte {
 #define FCP_TYPE_LINEAR_VARIABLE_EF	0x04
 #define FCP_TYPE_DF			0x38
 
+typedef struct {
+	uint8_t	*ptr;
+	size_t	 size;
+	size_t	 bytes_used;
+} cardos5_buf_t;
+
+void	cardos5_buf_init(cardos5_buf_t *, uint8_t *, size_t);
+int	cardos5_get_tag(struct sc_context *, uint16_t, uint8_t **, uint16_t *,
+	    cardos5_buf_t *);
+int	cardos5_put_tag(uint8_t, const void *, size_t, cardos5_buf_t *);
+int	cardos5_put_tag0(uint8_t, cardos5_buf_t *);
+int	cardos5_put_tag1(uint8_t, uint8_t, cardos5_buf_t *);
+int	cardos5_put_tag2(uint8_t, uint8_t, uint8_t, cardos5_buf_t *);
+int	cardos5_put_tag3(uint8_t, uint8_t, uint8_t, uint8_t, cardos5_buf_t *);
+int	cardos5_add_acl(uint8_t, unsigned int, int, cardos5_buf_t *);
+
 #endif /* !_OPENSC_CARD_CARDOS5_H */

@@ -49,154 +49,6 @@
 
 #define CURVEDB	"curvedb"
 
-typedef struct {
-	size_t				bytes;
-	struct sc_pkcs15_prkey_rsa	privkey;
-	struct sc_pkcs15_pubkey_rsa	pubkey;
-} rsa_keypair_t;
-
-typedef struct {
-	size_t				bytes;
-	struct sc_pkcs15_prkey_ec	privkey;
-	struct sc_pkcs15_pubkey_ec	pubkey;
-} ec_keypair_t;
-
-typedef struct {
-	uint8_t	*ptr;
-	size_t	 size;
-	size_t	 bytes_used;
-} buf_t;
-
-static void
-buf_init(buf_t *buf, uint8_t *ptr, size_t size)
-{
-	buf->ptr = ptr;
-	buf->size = size;
-	buf->bytes_used = 0;
-}
-
-static int
-asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
-    uint16_t *tag_length, buf_t *buf)
-{
-	const uint8_t	*tag_ptr;
-	size_t		 tag_len; /* size_t version of tag_length */
-	size_t		 delta;
-
-	tag_ptr = sc_asn1_find_tag(ctx, buf->ptr, buf->size - buf->bytes_used,
-	    tag, &tag_len);
-	if (tag_ptr == NULL || tag_ptr < buf->ptr)
-		return -1;
-
-	delta = tag_ptr - buf->ptr;
-	if (buf->size - buf->bytes_used < delta)
-		return -1;
-	buf->ptr += delta;
-	buf->bytes_used += delta;
-
-	if (tag_len > UINT16_MAX)
-		return -1;
-	*tag_length = (uint16_t)tag_len;
-	if (buf->size - buf->bytes_used < *tag_length)
-		return -1;
-
-	if (tag_content != NULL) {
-		if ((*tag_content = malloc(*tag_length)) == NULL)
-			return -1;
-		memcpy(*tag_content, buf->ptr, *tag_length);
-		buf->ptr += *tag_length;
-		buf->bytes_used += *tag_length;
-	}
-
-	return 0;
-}
-
-static int
-asn1_put_tag(uint8_t tag, const void *tag_content, size_t tag_content_len,
-    buf_t *buf)
-{
-	int		 r;
-	const uint8_t	*orig_ptr = buf->ptr;
-	size_t		 delta;
-
-	r = sc_asn1_put_tag(tag, (const uint8_t *)tag_content, tag_content_len,
-	    buf->ptr, buf->size - buf->bytes_used, &buf->ptr);
-	if (r == SC_SUCCESS) {
-		delta = buf->ptr - orig_ptr;
-		if (buf->ptr < orig_ptr || buf->size - buf->bytes_used < delta)
-			return -1;
-		buf->bytes_used += delta;
-		return 0;
-	}
-
-	return -1;
-}
-
-static int
-asn1_put_tag0(uint8_t tag, buf_t *buf)
-{
-	return asn1_put_tag(tag, NULL, 0, buf);
-}
-
-static int
-asn1_put_tag1(uint8_t tag, uint8_t tag_value, buf_t *buf)
-{
-	const uint8_t	tag_content[1] = { tag_value };
-
-	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
-static int
-asn1_put_tag2(uint8_t tag, uint8_t a, uint8_t b, buf_t *buf)
-{
-	const uint8_t	tag_content[2] = { a, b };
-
-	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
-static int
-asn1_put_tag3(uint8_t tag, uint8_t a, uint8_t b, uint8_t c, buf_t *buf)
-{
-	const uint8_t	tag_content[3] = { a, b, c };
-
-	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
-static int
-add_acl_tag(uint8_t am_byte, unsigned int ac, int key_ref, buf_t *buf)
-{
-	uint8_t	crt_buf[16];
-	buf_t	crt;
-
-	if (asn1_put_tag1(ARL_ACCESS_MODE_BYTE_TAG, am_byte, buf))
-		return -1;
-
-	switch (ac) {
-	case SC_AC_NONE:
-		/* SC_AC_NONE means operation ALWAYS allowed. */
-		return asn1_put_tag0(ARL_ALWAYS_TAG, buf);
-	case SC_AC_NEVER:
-		return asn1_put_tag0(ARL_NEVER_TAG, buf);
-	case SC_AC_CHV:
-	case SC_AC_TERM:
-	case SC_AC_AUT:
-		if (key_ref < 0 || (key_ref & BACKTRACK_BIT) ||
-		    key_ref > UINT8_MAX)
-			return -1;
-
-		buf_init(&crt, crt_buf, sizeof(crt_buf));
-
-		if (asn1_put_tag1(CRT_TAG_PINREF, (uint8_t)key_ref, &crt) ||
-		    asn1_put_tag1(CRT_TAG_KUQ, KUQ_USER_AUTH, &crt) ||
-		    asn1_put_tag(ARL_USER_AUTH_TAG, crt_buf, crt.bytes_used,
-		    buf))
-			return -1;
-		return 0;
-	default:
-		return -1;
-	}
-}
-
 static int
 store_pin(sc_profile_t *profile, sc_card_t *card,
     sc_pkcs15_auth_info_t *auth_info, int puk_id, const unsigned char *pin,
@@ -207,9 +59,9 @@ store_pin(sc_profile_t *profile, sc_card_t *card,
 	uint8_t					arl_buf[128];
 	uint8_t					retries_buf[16];
 	uint8_t					paddedpin[128];
-	buf_t					payload;
-	buf_t					arl;
-	buf_t					retries_oci;
+	cardos5_buf_t				payload;
+	cardos5_buf_t				arl;
+	cardos5_buf_t				retries_oci;
 	unsigned int				maxlen;
 	int					pin_ref;
 	int					retries;
@@ -249,39 +101,41 @@ store_pin(sc_profile_t *profile, sc_card_t *card,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
-	if (asn1_put_tag1(CRT_TAG_PINREF, (uint8_t)pin_ref, &payload) ||
-	    asn1_put_tag3(CRT_TAG_OBJPARAM, OBJPARAM_NOBACKTRACK, 0, 0,
-	    &payload) || asn1_put_tag1(CRT_TAG_CU, CU_USER_AUTH, &payload) ||
-	    asn1_put_tag1(CRT_TAG_KUQ, KUQ_USER_AUTH, &payload) ||
-	    asn1_put_tag2(CRT_TAG_ALGO_TYPE, ALGO_TYPE_PIN, 0, &payload) ||
-	    asn1_put_tag1(CRT_TAG_LIFECYCLE, LIFECYCLE_OPERATIONAL, &payload)) {
+	if (cardos5_put_tag1(CRT_TAG_PINREF, (uint8_t)pin_ref, &payload) ||
+	    cardos5_put_tag3(CRT_TAG_OBJPARAM, OBJPARAM_NOBACKTRACK, 0, 0,
+	      &payload) ||
+	    cardos5_put_tag1(CRT_TAG_CU, CU_USER_AUTH, &payload) ||
+	    cardos5_put_tag1(CRT_TAG_KUQ, KUQ_USER_AUTH, &payload) ||
+	    cardos5_put_tag2(CRT_TAG_ALGO_TYPE, ALGO_TYPE_PIN, 0, &payload) ||
+	    cardos5_put_tag1(CRT_TAG_LIFECYCLE, LIFECYCLE_OPERATIONAL,
+	      &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&retries_oci, retries_buf, sizeof(retries_buf));
+	cardos5_buf_init(&retries_oci, retries_buf, sizeof(retries_buf));
 
-	if (asn1_put_tag1(OCI_TAG_RETRIES, retries, &retries_oci)) {
+	if (cardos5_put_tag1(OCI_TAG_RETRIES, retries, &retries_oci)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&arl, arl_buf, sizeof(arl_buf));
+	cardos5_buf_init(&arl, arl_buf, sizeof(arl_buf));
 
-	if (add_acl_tag(AM_KEY_USE, SC_AC_NONE, -1, &arl) ||
-	    add_acl_tag(AM_KEY_CHANGE, SC_AC_CHV, pin_ref, &arl) ||
-	    (puk_id != -1 && add_acl_tag(AM_KEY_RESET_RETRY_CTR, SC_AC_CHV,
+	if (cardos5_add_acl(AM_KEY_USE, SC_AC_NONE, -1, &arl) ||
+	    cardos5_add_acl(AM_KEY_CHANGE, SC_AC_CHV, pin_ref, &arl) ||
+	    (puk_id != -1 && cardos5_add_acl(AM_KEY_RESET_RETRY_CTR, SC_AC_CHV,
 	    puk_id, &arl))) {
 		sc_log(card->ctx, "could not add acl tag");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	if (asn1_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, &payload) ||
-	    asn1_put_tag(CRT_TAG_RETRIES, retries_buf, retries_oci.bytes_used,
-	    &payload) || asn1_put_tag(CRT_TAG_KEYDATA, pin, pin_len,
-	    &payload)) {
+	if (cardos5_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, &payload) ||
+	    cardos5_put_tag(CRT_TAG_RETRIES, retries_buf,
+	      retries_oci.bytes_used, &payload) ||
+	    cardos5_put_tag(CRT_TAG_KEYDATA, pin, pin_len, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -300,7 +154,7 @@ cardos5_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	struct sc_card				*card = p15card->card;
 	struct sc_file				*file = NULL;
 	uint8_t					 payload_buf[8];
-	buf_t					 payload;
+	cardos5_buf_t				 payload;
 	int					 r;
 
 	r = sc_pkcs15init_create_file(profile, p15card, df);
@@ -311,10 +165,10 @@ cardos5_create_dir(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	if (r != SC_SUCCESS)
 		return r;
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	/* XXX do we need to specify an ARL for this SE object? */
-	if (asn1_put_tag1(CRT_DO_KEYREF, 0x01, &payload)) {
+	if (cardos5_put_tag1(CRT_DO_KEYREF, 0x01, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -391,6 +245,12 @@ cardos5_create_pin(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	return store_pin(profile, card, auth_info, puk_id, pin, pin_len);
 }
 
+typedef struct {
+	size_t				bytes;
+	struct sc_pkcs15_prkey_rsa	privkey;
+	struct sc_pkcs15_pubkey_rsa	pubkey;
+} rsa_keypair_t;
+
 static uint32_t	public_exponent = 0x010001; /* 65537 */
 
 static void
@@ -427,6 +287,12 @@ fill_in_dummy_rsa_key(rsa_keypair_t *rsa, uint8_t *dummy_data, size_t kbits)
 	}
 }
 
+typedef struct {
+	size_t				bytes;
+	struct sc_pkcs15_prkey_ec	privkey;
+	struct sc_pkcs15_pubkey_ec	pubkey;
+} ec_keypair_t;
+
 static void
 fill_in_dummy_ec_key(ec_keypair_t *ec, uint8_t *dummyQ, uint8_t *dummyD,
     size_t kbits)
@@ -458,12 +324,12 @@ push_obj(sc_card_t *card, const uint8_t *obj, size_t len, uint8_t *key_sha256)
 	}
 
 	for (done = 0; done < len; done += n) {
-		buf_t payload = { payload_buf, sizeof(payload_buf), 0 };
+		cardos5_buf_t payload = { payload_buf, sizeof(payload_buf), 0 };
 
 		if (done == 0) {
 			uint8_t len_hi = (uint8_t)(len >> 8);
 			uint8_t len_lo = (uint8_t)(len & 0xFF);
-			if (asn1_put_tag2(0x80, len_hi, len_lo, &payload)) {
+			if (cardos5_put_tag2(0x80, len_hi, len_lo, &payload)) {
 				sc_log(card->ctx, "asn1 error");
 				return SC_ERROR_BUFFER_TOO_SMALL;
 			}
@@ -475,7 +341,7 @@ push_obj(sc_card_t *card, const uint8_t *obj, size_t len, uint8_t *key_sha256)
 		if (n > 64)
 			n = 64;
 
-		if (asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_DATA_TAG,
+		if (cardos5_put_tag(CARDOS5_ACCUMULATE_OBJECT_DATA_TAG,
 		    obj + done, n, &payload)) {
 			sc_log(card->ctx, "asn1 error");
 			return SC_ERROR_BUFFER_TOO_SMALL;
@@ -496,9 +362,9 @@ push_obj(sc_card_t *card, const uint8_t *obj, size_t len, uint8_t *key_sha256)
 	return SC_SUCCESS;
 }
 
-/* add a key Control Reference template (CRT) to a buf_t. */
+/* add a key Control Reference template (CRT) to a cardos5_buf_t. */
 static int
-add_key_crt(int key_id, int algo, int active, int pubkey, buf_t *b)
+add_key_crt(int key_id, int algo, int active, int pubkey, cardos5_buf_t *b)
 {
 	uint8_t	changeable;
 	uint8_t	lifecycle;
@@ -530,12 +396,13 @@ add_key_crt(int key_id, int algo, int active, int pubkey, buf_t *b)
 	if (key_id < 0 || key_id > UINT8_MAX)
 		return -1;
 
-	if (asn1_put_tag1(CRT_DO_KEYREF, (uint8_t)key_id, b) ||
-	    asn1_put_tag3(CRT_TAG_OBJPARAM, OBJPARAM_NOBACKTRACK, changeable, 0,
-	    b) || asn1_put_tag1(CRT_TAG_CU, CU_CIPHER | CU_SIGN, b) ||
-	    asn1_put_tag1(CRT_TAG_KUQ, kuq, b) ||
-	    asn1_put_tag2(CRT_TAG_ALGO_TYPE, algo_type1, algo_type2, b) ||
-	    asn1_put_tag1(CRT_TAG_LIFECYCLE, lifecycle, b))
+	if (cardos5_put_tag1(CRT_DO_KEYREF, (uint8_t)key_id, b) ||
+	    cardos5_put_tag3(CRT_TAG_OBJPARAM, OBJPARAM_NOBACKTRACK,
+	      changeable, 0, b) ||
+	    cardos5_put_tag1(CRT_TAG_CU, CU_CIPHER | CU_SIGN, b) ||
+	    cardos5_put_tag1(CRT_TAG_KUQ, kuq, b) ||
+	    cardos5_put_tag2(CRT_TAG_ALGO_TYPE, algo_type1, algo_type2, b) ||
+	    cardos5_put_tag1(CRT_TAG_LIFECYCLE, lifecycle, b))
 		return -1;
 
 	return 0;
@@ -549,38 +416,38 @@ store_privkey(sc_card_t *card, int key_id, int algo, int active, int pin_id,
 	uint8_t					payload_buf[256];
 	uint8_t					arl_buf[128];
 	uint8_t					cmd[4];
-	buf_t					payload;
-	buf_t					arl;
+	cardos5_buf_t				payload;
+	cardos5_buf_t				arl;
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if (add_key_crt(key_id, algo, active, 0, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&arl, arl_buf, sizeof(arl_buf));
+	cardos5_buf_init(&arl, arl_buf, sizeof(arl_buf));
 
 	memset(cmd, 0, sizeof(cmd));
 	cmd[1] = CARDOS5_GENERATE_KEY_INS;
 	cmd[2] = CARDOS5_GENERATE_KEY_P1_EXTRACT;
 
-	if (asn1_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
-	    asn1_put_tag0(ARL_ALWAYS_TAG, &arl)) {
+	if (cardos5_put_tag(ARL_COMMAND_TAG, cmd, sizeof(cmd), &arl) ||
+	    cardos5_put_tag0(ARL_ALWAYS_TAG, &arl)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	if (add_acl_tag(AM_KEY_USE, SC_AC_CHV, pin_id, &arl) ||
-	    add_acl_tag(AM_KEY_CHANGE, SC_AC_CHV, pin_id, &arl) ||
-	    add_acl_tag(AM_KEY_OCI_UPD, SC_AC_CHV, pin_id, &arl) ||
-	    add_acl_tag(AM_KEY_DELETE, SC_AC_CHV, pin_id, &arl)) {
+	if (cardos5_add_acl(AM_KEY_USE, SC_AC_CHV, pin_id, &arl) ||
+	    cardos5_add_acl(AM_KEY_CHANGE, SC_AC_CHV, pin_id, &arl) ||
+	    cardos5_add_acl(AM_KEY_OCI_UPD, SC_AC_CHV, pin_id, &arl) ||
+	    cardos5_add_acl(AM_KEY_DELETE, SC_AC_CHV, pin_id, &arl)) {
 		sc_log(card->ctx, "could not add acl tag");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	if (asn1_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, &payload) ||
-	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, hash, 32,
+	if (cardos5_put_tag(FCP_TAG_ARL, arl_buf, arl.bytes_used, &payload) ||
+	    cardos5_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, hash, 32,
 	    &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
@@ -601,8 +468,8 @@ cardos_put_rsa_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 	uint8_t		 hash[32];
 	uint8_t		 payload_buf[2048];
 	uint8_t		 object_buf[2048];
-	buf_t		 payload;
-	buf_t		 object;
+	cardos5_buf_t	 payload;
+	cardos5_buf_t	 object;
 	int		 pin_ref;
 	int		 r;
 
@@ -617,44 +484,36 @@ cardos_put_rsa_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 	if (r != SC_SUCCESS)
 		return r;
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	/* >= 2048-bit keys follow the Chinese Remainder Theorem format. */
 	if (rsa->bytes > 256) {
-		if (asn1_put_tag(RSA_PRIVKEY_PRIME_P_TAG, rsa->privkey.p.data,
-		    rsa->privkey.p.len, &payload))
-			goto asn1_error;
-
-		if (asn1_put_tag(RSA_PRIVKEY_PRIME_Q_TAG, rsa->privkey.q.data,
-		    rsa->privkey.q.len, &payload))
-			goto asn1_error;
-
-		if (asn1_put_tag(RSA_PRIVKEY_QINV_TAG, rsa->privkey.iqmp.data,
-		    rsa->privkey.iqmp.len, &payload))
-			goto asn1_error;
-
-		if (asn1_put_tag(RSA_PRIVKEY_REMAINDER1_TAG,
-		    rsa->privkey.dmp1.data, rsa->privkey.dmp1.len, &payload))
-			goto asn1_error;
-
-		if (asn1_put_tag(RSA_PRIVKEY_REMAINDER2_TAG,
-		    rsa->privkey.dmq1.data, rsa->privkey.dmq1.len, &payload))
+		if (cardos5_put_tag(RSA_PRIVKEY_PRIME_P_TAG,
+		      rsa->privkey.p.data, rsa->privkey.p.len, &payload) ||
+		    cardos5_put_tag(RSA_PRIVKEY_PRIME_Q_TAG,
+		      rsa->privkey.q.data, rsa->privkey.q.len, &payload) ||
+		    cardos5_put_tag(RSA_PRIVKEY_QINV_TAG,
+		      rsa->privkey.iqmp.data, rsa->privkey.iqmp.len,
+		      &payload) ||
+		    cardos5_put_tag(RSA_PRIVKEY_REMAINDER1_TAG,
+		      rsa->privkey.dmp1.data, rsa->privkey.dmp1.len,
+		      &payload) ||
+		    cardos5_put_tag(RSA_PRIVKEY_REMAINDER2_TAG,
+		      rsa->privkey.dmq1.data, rsa->privkey.dmq1.len, &payload))
 			goto asn1_error;
 	} else {
-		if (asn1_put_tag(RSA_PRIVKEY_MODULUS_TAG,
-		    rsa->privkey.modulus.data, rsa->privkey.modulus.len,
-		    &payload))
-			goto asn1_error;
-
-		if (asn1_put_tag(RSA_PRIVKEY_EXPONENT_TAG,
-		    rsa->privkey.d.data, rsa->privkey.d.len, &payload))
+		if (cardos5_put_tag(RSA_PRIVKEY_MODULUS_TAG,
+		      rsa->privkey.modulus.data, rsa->privkey.modulus.len,
+		      &payload) ||
+		    cardos5_put_tag(RSA_PRIVKEY_EXPONENT_TAG,
+		      rsa->privkey.d.data, rsa->privkey.d.len, &payload))
 			goto asn1_error;
 	}
 
-	buf_init(&object, object_buf, sizeof(object_buf));
+	cardos5_buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
-	    &object))
+	if (cardos5_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
+	    payload.bytes_used, &object))
 		goto asn1_error;
 
 	r = push_obj(card, object_buf, object.bytes_used, hash);
@@ -678,7 +537,7 @@ asn1_error:
 
 static int
 extract_curve_oid(struct sc_card *card, const sc_pkcs15_prkey_info_t *keyinfo,
-    buf_t *payload)
+    cardos5_buf_t *payload)
 {
 	struct sc_ec_parameters *param;
 
@@ -714,8 +573,8 @@ put_ec_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 	unsigned char	hash[32];
 	unsigned char	payload_buf[256];
 	unsigned char	object_buf[256];
-	buf_t		payload;
-	buf_t		object;
+	cardos5_buf_t	payload;
+	cardos5_buf_t	object;
 	int		pin_ref;
 	int		r;
 
@@ -726,7 +585,7 @@ put_ec_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if ((r = extract_curve_oid(card, keyinfo, &payload)) != SC_SUCCESS)
 		return r;
@@ -735,16 +594,16 @@ put_ec_privkey(sc_profile_t *profile, struct sc_pkcs15_card *p15card,
 	if (r != SC_SUCCESS)
 		return r;
 
-	if (asn1_put_tag(ECC_PRIVKEY_D, ec->privkey.privateD.data,
+	if (cardos5_put_tag(ECC_PRIVKEY_D, ec->privkey.privateD.data,
 	    ec->privkey.privateD.len, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&object, object_buf, sizeof(object_buf));
+	cardos5_buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
-	    &object)) {
+	if (cardos5_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
+	    payload.bytes_used, &object)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -768,12 +627,12 @@ store_pubkey(sc_card_t *card, int key_id, int algo, unsigned char *hash)
 {
 	struct sc_cardctl_cardos_obj_info	args;
 	uint8_t					payload_buf[256];
-	buf_t					payload;
+	cardos5_buf_t				payload;
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if (add_key_crt(key_id, algo, 0, 1, &payload) ||
-	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, hash, 32,
+	    cardos5_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, hash, 32,
 	    &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
@@ -794,28 +653,26 @@ cardos_put_rsa_pubkey(struct sc_pkcs15_card *p15card,
 	uint8_t		 hash[32];
 	uint8_t		 payload_buf[768];
 	uint8_t		 object_buf[768];
-	buf_t		 payload;
-	buf_t		 object;
+	cardos5_buf_t	 payload;
+	cardos5_buf_t	 object;
 	int		 r;
 
 	r = sc_pkcs15init_set_lifecycle(card, SC_CARDCTRL_LIFECYCLE_ADMIN);
 	if (r != SC_SUCCESS)
 		return r;
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
-	if (asn1_put_tag(RSA_PUBKEY_MODULUS, rsa->pubkey.modulus.data,
-	    rsa->pubkey.modulus.len, &payload))
+	if (cardos5_put_tag(RSA_PUBKEY_MODULUS, rsa->pubkey.modulus.data,
+	      rsa->pubkey.modulus.len, &payload) ||
+	    cardos5_put_tag(RSA_PUBKEY_EXPONENT, rsa->pubkey.exponent.data,
+	      rsa->pubkey.exponent.len, &payload))
 		goto asn1_error;
 
-	if (asn1_put_tag(RSA_PUBKEY_EXPONENT, rsa->pubkey.exponent.data,
-	    rsa->pubkey.exponent.len, &payload))
-		goto asn1_error;
+	cardos5_buf_init(&object, object_buf, sizeof(object_buf));
 
-	buf_init(&object, object_buf, sizeof(object_buf));
-
-	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
-	    &object))
+	if (cardos5_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
+	    payload.bytes_used, &object))
 		goto asn1_error;
 
 	r = push_obj(card, object_buf, object.bytes_used, hash);
@@ -845,11 +702,11 @@ put_ec_pubkey(struct sc_pkcs15_card *p15card, sc_pkcs15_prkey_info_t *keyinfo,
 	unsigned char	hash[32];
 	unsigned char	payload_buf[256];
 	unsigned char	object_buf[256];
-	buf_t		payload;
-	buf_t		object;
+	cardos5_buf_t	payload;
+	cardos5_buf_t	object;
 	int		r;
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if ((r = extract_curve_oid(card, keyinfo, &payload)) != SC_SUCCESS)
 		return r;
@@ -858,16 +715,16 @@ put_ec_pubkey(struct sc_pkcs15_card *p15card, sc_pkcs15_prkey_info_t *keyinfo,
 	if (r != SC_SUCCESS)
 		return r;
 
-	if (asn1_put_tag(ECC_PUBKEY_Y, ec->pubkey.ecpointQ.value,
+	if (cardos5_put_tag(ECC_PUBKEY_Y, ec->pubkey.ecpointQ.value,
 	    ec->pubkey.ecpointQ.len, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
 
-	buf_init(&object, object_buf, sizeof(object_buf));
+	cardos5_buf_init(&object, object_buf, sizeof(object_buf));
 
-	if (asn1_put_tag(CONSTRUCTED_DATA_TAG, payload_buf, payload.bytes_used,
-	    &object)) {
+	if (cardos5_put_tag(CONSTRUCTED_DATA_TAG, payload_buf,
+	    payload.bytes_used, &object)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -895,9 +752,9 @@ extract_rsa_pubkey(sc_card_t *card, struct sc_pkcs15_prkey_info *keyinfo,
 	uint8_t					payload_buf[256];
 	uint8_t					crt_buf[24];
 	size_t					modulus_bytes;
-	buf_t					crt;
-	buf_t					payload;
-	buf_t					keybuf;
+	cardos5_buf_t				crt;
+	cardos5_buf_t				payload;
+	cardos5_buf_t				keybuf;
 	int					r;
 
 	modulus_bytes = keyinfo->modulus_length / 8;
@@ -906,11 +763,11 @@ extract_rsa_pubkey(sc_card_t *card, struct sc_pkcs15_prkey_info *keyinfo,
 		return SC_ERROR_INVALID_ARGUMENTS;
 	}
 
-	buf_init(&crt, crt_buf, sizeof(crt_buf));
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&crt, crt_buf, sizeof(crt_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if (add_key_crt(keyinfo->key_reference, SC_ALGORITHM_RSA, 1, 1, &crt) ||
-	    asn1_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
+	    cardos5_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -924,12 +781,12 @@ extract_rsa_pubkey(sc_card_t *card, struct sc_pkcs15_prkey_info *keyinfo,
 		return r;
 	}
 
-	buf_init(&keybuf, args.data, args.len);
+	cardos5_buf_init(&keybuf, args.data, args.len);
 
-	if (asn1_get_tag(card->ctx, 0x7F49, NULL, &taglen, &keybuf))
+	if (cardos5_get_tag(card->ctx, 0x7F49, NULL, &taglen, &keybuf))
 		goto parse_error;
 
-	if (asn1_get_tag(card->ctx, RSA_PUBKEY_MODULUS,
+	if (cardos5_get_tag(card->ctx, RSA_PUBKEY_MODULUS,
 	    &pubkey->u.rsa.modulus.data,
 	    (uint16_t *)&pubkey->u.rsa.modulus.len, &keybuf))
 		goto parse_error;
@@ -937,7 +794,7 @@ extract_rsa_pubkey(sc_card_t *card, struct sc_pkcs15_prkey_info *keyinfo,
 	if (pubkey->u.rsa.modulus.len != modulus_bytes)
 		goto parse_error;
 
-	if (asn1_get_tag(card->ctx, RSA_PUBKEY_EXPONENT,
+	if (cardos5_get_tag(card->ctx, RSA_PUBKEY_EXPONENT,
 	    &pubkey->u.rsa.exponent.data,
 	    (uint16_t *)&pubkey->u.rsa.exponent.len, &keybuf))
 		goto parse_error;
@@ -976,17 +833,17 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 	struct sc_ec_parameters			*ecp = NULL;
 	uint8_t					 payload_buf[768];
 	uint8_t					 crt_buf[24];
-	buf_t					 payload;
-	buf_t					 crt;
-	buf_t					 keybuf;
+	cardos5_buf_t				 payload;
+	cardos5_buf_t				 crt;
+	cardos5_buf_t				 keybuf;
 	int					 i;
 	int					 r;
 
-	buf_init(&crt, crt_buf, sizeof(crt_buf));
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&crt, crt_buf, sizeof(crt_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if (add_key_crt(keyinfo->key_reference, SC_ALGORITHM_EC, 1, 1, &crt) ||
-	    asn1_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
+	    cardos5_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
 		sc_log(card->ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -1013,17 +870,17 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 		return SC_ERROR_OUT_OF_MEMORY;
 	}
 
-	buf_init(&keybuf, args.data, args.len);
+	cardos5_buf_init(&keybuf, args.data, args.len);
 
 	/* Skip parts we are not interested in. */
 	for (i = 0; i < n_pubkey_parts; i++) {
 		uint16_t taglen;
 
 		if (pubkey_parts[i] == ECC_PUBKEY_OID) {
-			uint8_t	*oid, *encoded_oid_buf;
-			buf_t	 encoded_oid;
+			uint8_t		*oid, *encoded_oid_buf;
+			cardos5_buf_t	 encoded_oid;
 
-			if (asn1_get_tag(card->ctx, ECC_PUBKEY_OID, &oid,
+			if (cardos5_get_tag(card->ctx, ECC_PUBKEY_OID, &oid,
 			    &taglen, &keybuf)) {
 				sc_log(card->ctx, "couldn't get oid");
 				goto parse_error;
@@ -1035,9 +892,10 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 				goto parse_error;
 			}
 
-			buf_init(&encoded_oid, encoded_oid_buf, taglen + 2);
+			cardos5_buf_init(&encoded_oid, encoded_oid_buf,
+			    taglen + 2);
 
-			if (asn1_put_tag(ECC_PUBKEY_OID, oid, taglen,
+			if (cardos5_put_tag(ECC_PUBKEY_OID, oid, taglen,
 			    &encoded_oid)) {
 				sc_log(card->ctx, "couldn't encode oid");
 				free(encoded_oid_buf);
@@ -1059,7 +917,7 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 			    ecp->der.len);
 			pubkey->u.ec.params.der.len = ecp->der.len;
 		} else {
-			if (asn1_get_tag(card->ctx, pubkey_parts[i], NULL,
+			if (cardos5_get_tag(card->ctx, pubkey_parts[i], NULL,
 			    &taglen, &keybuf)) {
 				sc_log(card->ctx, "couldn't parse ec pubkey "
 				    "(0x%x)", pubkey_parts[i]);
@@ -1073,7 +931,8 @@ extract_ec_pubkey(sc_card_t *card, sc_pkcs15_prkey_info_t *keyinfo,
 		}
 	}
 
-	if (asn1_get_tag(card->ctx, ECC_PUBKEY_Y, &pubkey->u.ec.ecpointQ.value,
+	if (cardos5_get_tag(card->ctx, ECC_PUBKEY_Y,
+	    &pubkey->u.ec.ecpointQ.value,
 	    (uint16_t *)&pubkey->u.ec.ecpointQ.len, &keybuf)) {
 		sc_log(card->ctx, "couldn't parse ec pubkey");
 		goto parse_error;
@@ -1104,8 +963,8 @@ generate_rsa_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	struct sc_pkcs15_prkey_info *keyinfo = obj->data;
 	unsigned char dummy_key_data[512], payload_buf[256];
 	unsigned char crt_buf[24]; /* Control Reference Template */
-	buf_t crt = { crt_buf, sizeof(crt_buf), 0 };
-	buf_t payload = { payload_buf, sizeof(payload_buf), 0 };
+	cardos5_buf_t crt = { crt_buf, sizeof(crt_buf), 0 };
+	cardos5_buf_t payload = { payload_buf, sizeof(payload_buf), 0 };
 	struct sc_file *file = NULL;
 	size_t keybits;
 	rsa_keypair_t rsa;
@@ -1150,7 +1009,7 @@ generate_rsa_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	}
 
 	if (add_key_crt(keyinfo->key_reference, SC_ALGORITHM_RSA, 0, 0, &crt) ||
-	    asn1_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
+	    cardos5_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
 		sc_log(ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}
@@ -1246,49 +1105,59 @@ decode_curve_parameters(sc_card_t *card, uint8_t *curve_der,
 {
 	uint8_t		*tag = NULL;
 	uint16_t	 taglen;
-	buf_t		 der;
+	cardos5_buf_t	 der;
 	int		 r = SC_ERROR_OBJECT_NOT_VALID;
+	sc_context_t	*ctx = card->ctx;
 
-	buf_init(&der, curve_der, curve_der_len);
+	cardos5_buf_init(&der, curve_der, curve_der_len);
 
 #define SEQUENCE_TAG (SC_ASN1_TAG_SEQUENCE | SC_ASN1_TAG_CONSTRUCTED)
 
-	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der))
+	if (cardos5_get_tag(ctx, SEQUENCE_TAG, NULL, &taglen, &der))
 		goto out;
 
 	/* XXX What is the meaning of this INTEGER tag set to 1? */
-	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER, &tag, &taglen, &der) ||
-	    taglen != 1 || tag[0] != 0x01)
+	if (cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &tag, &taglen,
+	    &der) || taglen != 1 || tag[0] != 0x01) {
 		goto out;
+	}
 
 	/* OID and P are grouped in a sequence. */
-	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
-	    &param->oid.len, &der) || asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_INTEGER, &param->p.data, &param->p.len, &der))
+	if (cardos5_get_tag(ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
+	      &param->oid.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &param->p.data,
+	      &param->p.len, &der)) {
 		goto out;
+	}
 
 	/* A and B are grouped in a sequence. */
-	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->a.data,
-	    &param->a.len, &der) || asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_OCTET_STRING, &param->b.data, &param->b.len, &der))
+	if (cardos5_get_tag(ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_OCTET_STRING, &param->a.data,
+	      &param->a.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_OCTET_STRING, &param->b.data,
+	      &param->b.len, &der)) {
 		goto out;
+	}
 
 	free(tag);
 	tag = NULL;
 
 	/* Some curves have an optional seed value: skip it. */
-	if (der.ptr[0] == SC_ASN1_TAG_BIT_STRING && asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_BIT_STRING, &tag, &taglen, &der))
+	if (der.ptr[0] == SC_ASN1_TAG_BIT_STRING && cardos5_get_tag(ctx,
+	    SC_ASN1_TAG_BIT_STRING, &tag, &taglen, &der)) {
 		goto out;
+	}
 
 	/* G, R and F are ungrouped, but appear sequentially. */
-	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->g.data,
-	    &param->g.len, &der) || asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER,
-	    &param->r.data, &param->r.len, &der) || asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_INTEGER, &param->f.data, &param->f.len, &der))
+	if (cardos5_get_tag(ctx, SC_ASN1_TAG_OCTET_STRING, &param->g.data,
+	      &param->g.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &param->r.data,
+	      &param->r.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &param->f.data,
+	      &param->f.len, &der)) {
 		goto out;
+	}
 
 	/* Make sure that we consumed the whole buffer. */
 	if (der.size != der.bytes_used)
@@ -1306,15 +1175,15 @@ static int
 decode_curve_oid(sc_card_t *card, uint8_t *curve_oid, size_t curve_oid_len,
     struct curve_parameters *param)
 {
-	buf_t	oid;
+	cardos5_buf_t	oid;
 
 	/* free oid obtained by decode_curve_parameters() */
 	free(param->oid.data);
 	param->oid.data = NULL;
 
-	buf_init(&oid, curve_oid, curve_oid_len);
+	cardos5_buf_init(&oid, curve_oid, curve_oid_len);
 
-	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
+	if (cardos5_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
 	    &param->oid.len, &oid))
 		return SC_ERROR_OBJECT_NOT_VALID;
 
@@ -1330,9 +1199,9 @@ push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
 	uint8_t		ecd_buf[512];
 	uint8_t		obj_buf[512];
 	uint8_t		payload_buf[512];
-	buf_t		ecd;
-	buf_t		obj;
-	buf_t		payload;
+	cardos5_buf_t	ecd;
+	cardos5_buf_t	obj;
+	cardos5_buf_t	payload;
 	int		r;
 
 	/*
@@ -1340,15 +1209,15 @@ push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
 	 * parameters obtained from the curve's DER file.
 	 */
 
-	buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
+	cardos5_buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
 
-        if (asn1_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
-	    asn1_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
-	    asn1_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
-	    asn1_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
-	    asn1_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
-	    asn1_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
-	    asn1_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
+        if (cardos5_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
+	    cardos5_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
+	    cardos5_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
+	    cardos5_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
+	    cardos5_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
+	    cardos5_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
+	    cardos5_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	/*
@@ -1356,9 +1225,10 @@ push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
 	 * We push this object to the card and retrieve its SHA256 hash.
 	 */
 
-	buf_init(&obj, obj_buf, sizeof(obj_buf));
+	cardos5_buf_init(&obj, obj_buf, sizeof(obj_buf));
 
-        if (asn1_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
+        if (cardos5_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used,
+	    &obj))
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
 	r = push_obj(card, obj_buf, obj.bytes_used, sha256);
@@ -1371,11 +1241,11 @@ push_curve_parameters(struct sc_card *card, const struct curve_parameters *p,
 	 * Finally, we build the APDU payload (containing the hash) and send it.
 	 */
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
-	if (asn1_put_tag1(CRT_DO_KEYREF, ecd_id, &payload) ||
-	    asn1_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
-	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
+	if (cardos5_put_tag1(CRT_DO_KEYREF, ecd_id, &payload) ||
+	    cardos5_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
+	    cardos5_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
 	    sizeof(sha256), &payload))
 		return SC_ERROR_BUFFER_TOO_SMALL;
 
@@ -1570,8 +1440,8 @@ generate_ec_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 	uint8_t					 payload_buf[256];
 	uint8_t					 crt_buf[24];
 	size_t					 keybits;
-	buf_t					 crt;
-	buf_t					 payload;
+	cardos5_buf_t				 crt;
+	cardos5_buf_t				 payload;
 	int					 r;
 
 	if (obj->type != SC_PKCS15_TYPE_PRKEY_EC)
@@ -1617,11 +1487,11 @@ generate_ec_key(sc_profile_t *profile, sc_pkcs15_card_t *p15card,
 		return r;
 	}
 
-	buf_init(&crt, crt_buf, sizeof(crt_buf));
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&crt, crt_buf, sizeof(crt_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 	if (add_key_crt(keyinfo->key_reference, SC_ALGORITHM_EC, 0, 0, &crt) ||
-	    asn1_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
+	    cardos5_put_tag(CRT_DO_DST, crt_buf, crt.bytes_used, &payload)) {
 		sc_log(ctx, "asn1 error");
 		return SC_ERROR_BUFFER_TOO_SMALL;
 	}

@@ -69,93 +69,6 @@ sc_pkcs15_card_t	*p15card;
 const char		*seed_path = NULL;
 const char		*pin = NULL;
 
-typedef struct {
-	uint8_t	*ptr;
-	size_t	 size;
-	size_t	 bytes_used;
-} buf_t;
-
-static void
-buf_init(buf_t *buf, uint8_t *ptr, size_t size)
-{
-	buf->ptr = ptr;
-	buf->size = size;
-	buf->bytes_used = 0;
-}
-
-static int
-asn1_get_tag(struct sc_context *ctx, uint16_t tag, uint8_t **tag_content,
-    uint16_t *tag_length, buf_t *buf)
-{
-	const uint8_t	*tag_ptr;
-	size_t		 tag_len; /* size_t version of tag_length */
-	size_t		 delta;
-
-	tag_ptr = sc_asn1_find_tag(ctx, buf->ptr, buf->size - buf->bytes_used,
-	    tag, &tag_len);
-	if (tag_ptr == NULL || tag_ptr < buf->ptr)
-		return -1;
-
-	delta = tag_ptr - buf->ptr;
-	if (buf->size - buf->bytes_used < delta)
-		return -1;
-	buf->ptr += delta;
-	buf->bytes_used += delta;
-
-	if (tag_len > UINT16_MAX)
-		return -1;
-	*tag_length = tag_len;
-	if (buf->size - buf->bytes_used < *tag_length)
-		return -1;
-
-	if (tag_content != NULL) {
-		if ((*tag_content = malloc(*tag_length)) == NULL)
-			return -1;
-		memcpy(*tag_content, buf->ptr, *tag_length);
-		buf->ptr += *tag_length;
-		buf->bytes_used += *tag_length;
-	}
-
-	return 0;
-}
-
-static int
-asn1_put_tag(uint8_t tag, const void *tag_content, size_t tag_content_len,
-    buf_t *buf)
-{
-	int		 r;
-	const uint8_t	*orig_ptr = buf->ptr;
-	size_t		 delta;
-
-	r = sc_asn1_put_tag(tag, (const uint8_t *)tag_content, tag_content_len,
-	    buf->ptr, buf->size - buf->bytes_used, &buf->ptr);
-	if (r == SC_SUCCESS) {
-		delta = buf->ptr - orig_ptr;
-		if (buf->ptr < orig_ptr || buf->size - buf->bytes_used < delta)
-			return -1;
-		buf->bytes_used += delta;
-		return 0;
-	}
-
-	return -1;
-}
-
-static int
-asn1_put_tag1(unsigned char tag, unsigned char tag_value, buf_t *buf)
-{
-	const unsigned char tag_content[1] = { tag_value };
-
-	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
-static int
-asn1_put_tag2(unsigned char tag, uint8_t a, uint8_t b, buf_t *buf)
-{
-	const unsigned char tag_content[2] = { a, b };
-
-	return asn1_put_tag(tag, tag_content, sizeof(tag_content), buf);
-}
-
 int
 get_cycle_phase(void)
 {
@@ -633,67 +546,85 @@ extract_curve_parameters(uint8_t *curve_der, ssize_t curve_der_len,
 {
 	uint8_t		*tag = NULL;
 	uint16_t	 taglen;
-	buf_t		 der;
+	cardos5_buf_t	 der;
+	sc_context_t	*ctx = card->ctx;
 
 	memset(param, 0, sizeof(*param));
 
-	buf_init(&der, curve_der, curve_der_len);
+	cardos5_buf_init(&der, curve_der, curve_der_len);
 
 #define SEQUENCE_TAG (SC_ASN1_TAG_SEQUENCE | SC_ASN1_TAG_CONSTRUCTED)
 
-	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der))
-		util_fatal("%s: error decoding curve der 1", __func__);
+	if (cardos5_get_tag(ctx, SEQUENCE_TAG, NULL, &taglen, &der)) {
+		goto error;
+	}
 
 	/* XXX What is the meaning of this INTEGER tag set to 1? */
-	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER, &tag, &taglen, &der) ||
-	    taglen != 1 || tag[0] != 0x01)
-		util_fatal("%s: error decoding curve der 2", __func__);
+	if (cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &tag, &taglen, &der) ||
+	    taglen != 1 || tag[0] != 0x01) {
+		goto error;
+	}
 
 	/* OID and P are grouped in a sequence. */
-	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
-	    &param->oid.len, &der) || asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_INTEGER, &param->p.data, &param->p.len, &der))
-		util_fatal("%s: error decoding curve der 3", __func__);
+	if (cardos5_get_tag(ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
+	      &param->oid.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &param->p.data,
+	      &param->p.len, &der)) {
+		goto error;
+	}
 
 	/* A and B are grouped in a sequence. */
-	if (asn1_get_tag(card->ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
-	    asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->a.data,
-	    &param->a.len, &der) || asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_OCTET_STRING, &param->b.data, &param->b.len, &der))
-		util_fatal("%s: error decoding curve der 4", __func__);
+	if (cardos5_get_tag(ctx, SEQUENCE_TAG, NULL, &taglen, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_OCTET_STRING, &param->a.data,
+	      &param->a.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_OCTET_STRING, &param->b.data,
+	      &param->b.len, &der)) {
+		goto error;
+	}
 
 	free(tag);
+	tag = NULL;
 
 	/* Some curves have an optional seed value: skip it. */
-	if (der.ptr[0] == SC_ASN1_TAG_BIT_STRING && asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_BIT_STRING, &tag, &taglen, &der))
-		util_fatal("%s: error decoding curve der 5", __func__);
+	if (der.ptr[0] == SC_ASN1_TAG_BIT_STRING && cardos5_get_tag(ctx,
+	    SC_ASN1_TAG_BIT_STRING, &tag, &taglen, &der)) {
+		goto error;
+	}
 
 	/* G, R and F are ungrouped, but appear sequentially. */
-	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OCTET_STRING, &param->g.data,
-	    &param->g.len, &der) || asn1_get_tag(card->ctx, SC_ASN1_TAG_INTEGER,
-	    &param->r.data, &param->r.len, &der) || asn1_get_tag(card->ctx,
-	    SC_ASN1_TAG_INTEGER, &param->f.data, &param->f.len, &der))
-		util_fatal("%s: error decoding curve der 6", __func__);
+	if (cardos5_get_tag(ctx, SC_ASN1_TAG_OCTET_STRING, &param->g.data,
+	      &param->g.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &param->r.data,
+	      &param->r.len, &der) ||
+	    cardos5_get_tag(ctx, SC_ASN1_TAG_INTEGER, &param->f.data,
+	      &param->f.len, &der)) {
+		goto error;
+	}
 
 	/* Make sure that we consumed the whole buffer. */
-	if (der.size != der.bytes_used)
-		util_fatal("%s: error decoding curve der 7", __func__);
+	if (der.size == der.bytes_used)
+		return;
+
+error:
+	if (tag != NULL)
+		free(tag);
+
+	util_fatal("%s: error decoding curve der", __func__);
 }
 
 void
 extract_curve_oid(uint8_t *curve_oid, ssize_t curve_oid_len,
     struct curve_parameters *param)
 {
-	buf_t	oid;
+	cardos5_buf_t	oid;
 
 	/* free oid obtained by extract_curve_parameters() */
 	free(param->oid.data);
 
-	buf_init(&oid, curve_oid, curve_oid_len);
+	cardos5_buf_init(&oid, curve_oid, curve_oid_len);
 
-	if (asn1_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
+	if (cardos5_get_tag(card->ctx, SC_ASN1_TAG_OBJECT, &param->oid.data,
 	    &param->oid.len, &oid))
 		util_fatal("%s: error decoding curve oid", __func__);
 }
@@ -716,14 +647,14 @@ push_object(const uint8_t *object, size_t object_len, uint8_t *sha256)
 		util_fatal("%s: invalid len %zu", __func__, object_len);
 
 	for (done = 0; done < object_len; done += n) {
-		buf_t	payload;
+		cardos5_buf_t	payload;
 
-		buf_init(&payload, payload_buf, sizeof(payload_buf));
+		cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
 		if (done == 0) {
 			uint8_t len_hi = (uint8_t)(object_len >> 8);
 			uint8_t len_lo = (uint8_t)(object_len & 0xFF);
-			if (asn1_put_tag2(0x80, len_hi, len_lo, &payload))
+			if (cardos5_put_tag2(0x80, len_hi, len_lo, &payload))
 				util_fatal("%s: asn1 error", __func__);
 			args.append = 0; /* allocate new object */
 		} else
@@ -733,7 +664,7 @@ push_object(const uint8_t *object, size_t object_len, uint8_t *sha256)
 		if (n > 64)
 			n = 64;
 
-		if (asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_DATA_TAG,
+		if (cardos5_put_tag(CARDOS5_ACCUMULATE_OBJECT_DATA_TAG,
 		    object + done, n, &payload))
 			util_fatal("%s: asn1 error", __func__);
 
@@ -771,9 +702,9 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	uint8_t		ecd_buf[512];
 	uint8_t		obj_buf[512];
 	uint8_t		payload_buf[512];
-	buf_t		ecd;
-	buf_t		obj;
-	buf_t		payload;
+	cardos5_buf_t	ecd;
+	cardos5_buf_t	obj;
+	cardos5_buf_t	payload;
 	sc_apdu_t	apdu;
 	int		pin_id;
 	int		r;
@@ -794,15 +725,15 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	 * parameters obtained from the curve's DER file.
 	 */
 
-	buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
+	cardos5_buf_init(&ecd, ecd_buf, sizeof(ecd_buf));
 
-        if (asn1_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
-	    asn1_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
-	    asn1_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
-	    asn1_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
-	    asn1_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
-	    asn1_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
-	    asn1_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
+        if (cardos5_put_tag(ECD_CURVE_OID, p->oid.data, p->oid.len, &ecd) ||
+	    cardos5_put_tag(ECD_PRIME_P, p->p.data, p->p.len, &ecd) ||
+	    cardos5_put_tag(ECD_COEFFICIENT_A, p->a.data, p->a.len, &ecd) ||
+	    cardos5_put_tag(ECD_COEFFICIENT_B, p->b.data, p->b.len, &ecd) ||
+	    cardos5_put_tag(ECD_GENERATOR_POINT_G, p->g.data, p->g.len, &ecd) ||
+	    cardos5_put_tag(ECD_ORDER_R, p->r.data, p->r.len, &ecd) ||
+	    cardos5_put_tag(ECD_CO_FACTOR_F, p->f.data, p->f.len, &ecd))
 		util_fatal("%s: asn1 error", __func__);
 
 	/*
@@ -810,9 +741,10 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	 * We push this object to the card and retrieve its SHA256 hash.
 	 */
 
-	buf_init(&obj, obj_buf, sizeof(obj_buf));
+	cardos5_buf_init(&obj, obj_buf, sizeof(obj_buf));
 
-        if (asn1_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used, &obj))
+        if (cardos5_put_tag(CONSTRUCTED_DATA_TAG, ecd_buf, ecd.bytes_used,
+	    &obj))
 		util_fatal("%s: asn1 error", __func__);
 
 	push_object(obj_buf, obj.bytes_used, sha256);
@@ -822,11 +754,11 @@ push_curve_parameters(const struct curve_parameters *p, uint8_t ecd_slot)
 	 * XXX The curve reference (ID) is hardcoded to 0x01.
 	 */
 
-	buf_init(&payload, payload_buf, sizeof(payload_buf));
+	cardos5_buf_init(&payload, payload_buf, sizeof(payload_buf));
 
-	if (asn1_put_tag1(CRT_DO_KEYREF, ecd_slot, &payload) ||
-	    asn1_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
-	    asn1_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
+	if (cardos5_put_tag1(CRT_DO_KEYREF, ecd_slot, &payload) ||
+	    cardos5_put_tag1(CRT_TAG_ALGO_TYPE, 0x0D, &payload) ||
+	    cardos5_put_tag(CARDOS5_ACCUMULATE_OBJECT_HASH_TAG, sha256,
 	    sizeof(sha256), &payload))
 		util_fatal("%s: asn1 error", __func__);
 
