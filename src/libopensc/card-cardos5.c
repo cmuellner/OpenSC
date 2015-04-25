@@ -318,7 +318,7 @@ cardos5_list_files(sc_card_t *card, unsigned char *buf, size_t buflen)
 	} while (offset != next_offset);
 
 	/* return number of bytes used for extracted file IDs */
-	return entries.bytes_used;
+	return (int)entries.bytes_used;
 }
 
 static int
